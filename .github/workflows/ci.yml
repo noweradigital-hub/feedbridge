@@ -12,7 +12,9 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Balík vzniká s viditeľnosťou repozitára v čase prvého vydania. Pôvodný "feedbridge"
+  # vznikol zo súkromného repozitára a ostal súkromný, VPS (bez docker login) potrebuje verejný.
+  IMAGE_NAME: ${{ github.repository }}-app
 
 jobs:
   test:
