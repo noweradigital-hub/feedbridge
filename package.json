@@ -1,0 +1,21 @@
+{
+  "name": "feedbridge",
+  "version": "0.1.0",
+  "description": "Medzistupeň medzi WooCommerce feedom a Metou: pravidlá, projekty, obrázky s novým pozadím, UI.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --no-warnings test/run.js && node --no-warnings test/api.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.11.2",
+    "sharp": "^0.35.5",
+    "undici": "^7.30.0"
+  }
+}

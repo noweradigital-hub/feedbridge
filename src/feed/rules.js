@@ -1,0 +1,296 @@
+/**
+ * Pravidlový engine. Projekt má usporiadaný zoznam pravidiel, ktoré sa aplikujú
+ * na každú položku feedu v danom poradí.
+ *
+ * Typy pravidiel:
+ *  exclude   { when }                                   -> položka vypadne z feedu
+ *  set       { field, value, when, onlyIfEmpty }        -> nastaví pole zo šablóny, napr. "{brand} - {title}"
+ *  replace   { field, find, with, regex, when }         -> nájdi/nahraď v poli
+ *  clean_html{ field, when }                            -> odstráni HTML, entity, zbytočné medzery
+ *  truncate  { field, length, when }                    -> skráti na celé slovo
+ *  price     { field, mode: percent|add|round, value }  -> úprava ceny (price / sale_price)
+ *  remove    { field, when }                            -> zmaže pole
+ *
+ * Podmienky (when): pole objektov { field, op, value }, všetky musia platiť (AND).
+ * ops: eq neq contains ncontains regex empty nempty gt lt gte lte in
+ * Dopočítané polia: price_num, sale_price_num, discount_pct, currency
+ */
+
+export const RULE_TYPES = ['exclude', 'set', 'replace', 'clean_html', 'truncate', 'price', 'remove'];
+
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+export function stripHtml(s) {
+  return String(s ?? '')
+    .replace(/<\s*br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6])>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => {
+      if (e[0] === '#') {
+        const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+        return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+      }
+      return ENTITIES[e.toLowerCase()] ?? m;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function parsePrice(v) {
+  if (typeof v !== 'string' || !v.trim()) return null;
+  const m = v.match(/(-?[\d][\d\s.,]*)\s*([A-Za-z]{3})?/);
+  if (!m) return null;
+  let num = m[1].replace(/\s/g, '');
+  const lastComma = num.lastIndexOf(',');
+  const lastDot = num.lastIndexOf('.');
+  if (lastComma > -1 && lastDot > -1) {
+    // posledný oddeľovač je desatinný
+    num = lastComma > lastDot ? num.replace(/\./g, '').replace(',', '.') : num.replace(/,/g, '');
+  } else if (lastComma > -1) {
+    num = num.replace(',', '.');
+  }
+  const n = parseFloat(num);
+  if (!Number.isFinite(n)) return null;
+  return { amount: n, currency: m[2] ? m[2].toUpperCase() : '' };
+}
+
+export function formatPrice(amount, currency) {
+  return `${amount.toFixed(2)}${currency ? ' ' + currency : ''}`;
+}
+
+function scalar(v) {
+  if (Array.isArray(v)) return typeof v[0] === 'string' ? v[0] : '';
+  return typeof v === 'string' ? v : '';
+}
+
+/** Hodnota poľa vrátane dopočítaných. */
+export function fieldValue(item, field) {
+  switch (field) {
+    case 'price_num': {
+      const p = parsePrice(scalar(item.price));
+      return p ? String(p.amount) : '';
+    }
+    case 'sale_price_num': {
+      const p = parsePrice(scalar(item.sale_price));
+      return p ? String(p.amount) : '';
+    }
+    case 'currency': {
+      const p = parsePrice(scalar(item.price));
+      return p ? p.currency : '';
+    }
+    case 'discount_pct': {
+      const p = parsePrice(scalar(item.price));
+      const s = parsePrice(scalar(item.sale_price));
+      if (!p || !s || p.amount <= 0 || s.amount >= p.amount) return '0';
+      return String(Math.round((1 - s.amount / p.amount) * 100));
+    }
+    default:
+      return scalar(item[field]);
+  }
+}
+
+export function testCondition(item, cond) {
+  const raw = fieldValue(item, cond.field);
+  const val = String(cond.value ?? '');
+  let a = raw.toLowerCase();
+  let b = val.toLowerCase();
+  if (cond.field === 'availability' && ['eq', 'neq', 'in'].includes(cond.op)) {
+    // podmienka "in_stock" aj "in stock" platí pred aj po normalizácii na formát Mety (contains/regex ostávajú doslovné)
+    a = metaAvailability(a);
+    b = cond.op === 'in' ? b.split(',').map((x) => metaAvailability(x.trim())).join(',') : metaAvailability(b);
+  }
+  switch (cond.op) {
+    case 'eq': return a === b;
+    case 'neq': return a !== b;
+    case 'contains': return a.includes(b);
+    case 'ncontains': return !a.includes(b);
+    case 'regex':
+      try { return new RegExp(val, 'i').test(raw); } catch { return false; }
+    case 'empty': return raw.trim() === '';
+    case 'nempty': return raw.trim() !== '';
+    case 'in': return b.split(',').map((x) => x.trim()).filter(Boolean).includes(a);
+    case 'gt': case 'lt': case 'gte': case 'lte': {
+      const x = parseFloat(raw.replace(',', '.'));
+      const y = parseFloat(val.replace(',', '.'));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+      return cond.op === 'gt' ? x > y : cond.op === 'lt' ? x < y : cond.op === 'gte' ? x >= y : x <= y;
+    }
+    default: return false;
+  }
+}
+
+export function testWhen(item, when) {
+  if (!Array.isArray(when) || !when.length) return true;
+  return when.every((c) => c && c.field && testCondition(item, c));
+}
+
+const FILTERS = {
+  upper: (s) => s.toUpperCase(),
+  lower: (s) => s.toLowerCase(),
+  title: (s) => s.toLowerCase().replace(/(^|\s)(\S)/g, (_, a, b) => a + b.toUpperCase()),
+  trim: (s) => s.trim(),
+  strip_html: (s) => stripHtml(s),
+  first_word: (s) => s.trim().split(/\s+/)[0] || '',
+  last_category: (s) => s.split(/\s*>\s*/).pop() || '',
+  first_category: (s) => s.split(/\s*>\s*/)[0] || '',
+};
+
+/** Šablóna: "{brand} - {title|title} ({product_type|last_category}) {description|strip_html|truncate:120}" */
+export function renderTemplate(tpl, item) {
+  return String(tpl ?? '')
+    .replace(/\{([a-z0-9_]+)((?:\|[a-z_]+(?::[^|}]*)?)*)\}/gi, (_, field, filters) => {
+      let v = fieldValue(item, field);
+      for (const f of filters.split('|').filter(Boolean)) {
+        const [name, arg] = f.split(':');
+        if (name === 'truncate') v = truncateWords(v, parseInt(arg, 10) || 100);
+        else if (name === 'default') { if (!v) v = arg ?? ''; }
+        else if (FILTERS[name]) v = FILTERS[name](v);
+      }
+      return v;
+    })
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?)])/g, '$1')
+    .replace(/\(\s*\)/g, '')
+    .replace(/(^|\s)[–\-|,]\s*$/g, '')
+    .trim();
+}
+
+export function truncateWords(s, max) {
+  s = String(s ?? '');
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 1);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s,.;:–-]+$/, '') + '…';
+}
+
+function setScalar(item, field, value) {
+  if (field === 'additional_image_link') {
+    item[field] = value ? [value] : [];
+  } else {
+    item[field] = value;
+  }
+}
+
+/**
+ * Aplikuje pravidlá na jednu položku.
+ * Vráti { item, excluded: null | {rule, index}, changes: [polia, ktoré sa zmenili] }
+ */
+export function applyRules(original, rules) {
+  const item = structuredClone(original);
+  const changed = new Set();
+  for (let i = 0; i < (rules || []).length; i++) {
+    const r = rules[i];
+    if (!r || r.enabled === false) continue;
+    if (!testWhen(item, r.when)) continue;
+    switch (r.type) {
+      case 'exclude':
+        return { item, excluded: { index: i, note: r.note || '' }, changed: [...changed] };
+      case 'set': {
+        if (!r.field) break;
+        if (r.onlyIfEmpty && fieldValue(item, r.field).trim() !== '') break;
+        setScalar(item, r.field, renderTemplate(r.value, item));
+        changed.add(r.field);
+        break;
+      }
+      case 'replace': {
+        if (!r.field || r.find === undefined || r.find === '') break;
+        const cur = fieldValue(item, r.field);
+        let next = cur;
+        if (r.regex) {
+          try { next = cur.replace(new RegExp(r.find, 'gi'), r.with ?? ''); } catch { /* neplatný regex ignorujeme */ }
+        } else {
+          next = cur.split(r.find).join(r.with ?? '');
+        }
+        if (next !== cur) { setScalar(item, r.field, next.replace(/\s{2,}/g, ' ').trim()); changed.add(r.field); }
+        break;
+      }
+      case 'clean_html': {
+        if (!r.field) break;
+        const cur = fieldValue(item, r.field);
+        const next = stripHtml(cur);
+        if (next !== cur) { setScalar(item, r.field, next); changed.add(r.field); }
+        break;
+      }
+      case 'truncate': {
+        if (!r.field) break;
+        const cur = fieldValue(item, r.field);
+        const next = truncateWords(cur, Number(r.length) || 150);
+        if (next !== cur) { setScalar(item, r.field, next); changed.add(r.field); }
+        break;
+      }
+      case 'price': {
+        const field = r.field === 'sale_price' ? 'sale_price' : 'price';
+        const p = parsePrice(fieldValue(item, field));
+        if (!p) break;
+        const v = parseFloat(String(r.value ?? '0').replace(',', '.')) || 0;
+        let amount = p.amount;
+        if (r.mode === 'percent') amount = amount * (1 + v / 100);
+        else if (r.mode === 'add') amount = amount + v;
+        else if (r.mode === 'round') amount = v > 0 ? Math.round(amount / v) * v : Math.round(amount);
+        item[field] = formatPrice(Math.max(0, amount), p.currency);
+        changed.add(field);
+        break;
+      }
+      case 'remove': {
+        if (r.field && r.field in item) { delete item[r.field]; changed.add(r.field); }
+        break;
+      }
+      default: break;
+    }
+  }
+  for (const f of normalizeForMeta(item)) changed.add(f);
+  return { item, excluded: null, changed: [...changed] };
+}
+
+// Google formát (in_stock, backorder…) -> hodnoty, ktoré uvádza Meta špecifikácia
+const AVAILABILITY_MAP = {
+  in_stock: 'in stock', out_of_stock: 'out of stock', preorder: 'preorder',
+  backorder: 'available for order', available_for_order: 'available for order',
+};
+
+function metaAvailability(v) {
+  return AVAILABILITY_MAP[String(v).trim().toLowerCase().replace(/\s+/g, '_')] ?? v;
+}
+
+/** Zjednotí hodnoty polí na formát Mety. Vráti zoznam zmenených polí. */
+export function normalizeForMeta(item) {
+  const changed = [];
+  const av = fieldValue(item, 'availability').trim().toLowerCase();
+  const mapped = AVAILABILITY_MAP[av.replace(/\s+/g, '_')];
+  if (mapped && mapped !== item.availability) { item.availability = mapped; changed.push('availability'); }
+  const cond = fieldValue(item, 'condition').trim();
+  if (cond && cond !== cond.toLowerCase()) { item.condition = cond.toLowerCase(); changed.push('condition'); }
+  return changed;
+}
+
+export const REQUIRED_FIELDS = ['id', 'title', 'description', 'link', 'image_link', 'price', 'availability', 'condition'];
+const AVAILABILITY = ['in stock', 'out of stock', 'preorder', 'available for order', 'discontinued'];
+const CONDITIONS = ['new', 'refurbished', 'used', 'used_like_new', 'used_good', 'used_fair', 'cpo', 'open_box_new'];
+
+/**
+ * Meta katalóg: errors = položka bude odmietnutá (počíta sa do "invalid"),
+ * warnings = odporúčané polia (brand/gtin/mpn), položka prejde.
+ */
+export function checkItem(item) {
+  const errors = [];
+  const warnings = [];
+  for (const f of REQUIRED_FIELDS) {
+    if (fieldValue(item, f).trim() === '') errors.push(`chýba ${f}`);
+  }
+  const t = fieldValue(item, 'title');
+  if (t.length > 200) errors.push('title > 200 znakov');
+  const d = fieldValue(item, 'description');
+  if (d.length > 9999) errors.push('description > 9999 znakov');
+  const p = parsePrice(fieldValue(item, 'price'));
+  if (fieldValue(item, 'price') && !p) errors.push('price v neplatnom formáte');
+  const av = fieldValue(item, 'availability');
+  if (av && !AVAILABILITY.includes(av.toLowerCase())) errors.push(`availability "${av}" nie je platná hodnota`);
+  const cond = fieldValue(item, 'condition');
+  if (cond && !CONDITIONS.includes(cond.toLowerCase())) errors.push(`condition "${cond}" nie je platná hodnota`);
+  if (!['brand', 'gtin', 'mpn'].some((f) => fieldValue(item, f).trim() !== '')) warnings.push('chýba brand (ani gtin/mpn)');
+  return { errors, warnings };
+}
+
+export function validateItem(item) {
+  return checkItem(item).errors;
+}

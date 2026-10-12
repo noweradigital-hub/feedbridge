@@ -1,0 +1,16 @@
+services:
+  feedbridge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # lokálny beh; produkčné nasadenie je v deploy/compose.yml
+    env_file: .env
+    volumes:
+      - ./data:/data
+
+  # Voliteľné: vlastný server na odstraňovanie pozadia (provider "rembg").
+  # Odkomentuj a v .env nastav REMBG_URL=http://rembg:7000/api/remove
+  # rembg:
+  #   image: danielgatis/rembg:latest
+  #   command: s --host 0.0.0.0 --port 7000
+  #   restart: unless-stopped

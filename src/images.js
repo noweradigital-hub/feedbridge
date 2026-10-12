@@ -1,0 +1,455 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import sharp from 'sharp';
+import { config } from './config.js';
+import { testWhen } from './feed/rules.js';
+import { safeFetch } from './net.js';
+
+const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
+const DAY = 86_400_000;
+
+async function exists(p) {
+  try { await fs.access(p); return true; } catch { return false; }
+}
+const touch = (file) => fs.utimes(file, new Date(), new Date()).catch(() => {});
+
+// Rovnaký súbor (napr. varianty so spoločnou fotkou) sa vyrába len raz, ostatní čakajú na ten istý Promise.
+const inflight = new Map();
+function once(key, fn) {
+  let p = inflight.get(key);
+  if (!p) {
+    p = Promise.resolve().then(fn).finally(() => inflight.delete(key));
+    inflight.set(key, p);
+  }
+  return p;
+}
+
+// Zápis cez unikátny .tmp + rename, aby exists() nikdy nevidel napoly zapísaný súbor.
+async function writeAtomic(file, buf) {
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fs.writeFile(tmp, buf);
+    await fs.rename(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true });
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------- originály
+
+// Obrázky z e-shopov sú nedôveryhodný vstup: malý súbor môže mať obrovské rozmery
+// a pri dekódovaní zabrať gigabajty pamäte. Všetko cudzie preto otvárame s týmto limitom.
+const MAX_PIXELS = 50_000_000;
+const untrusted = (input) => sharp(input, { limitInputPixels: MAX_PIXELS });
+
+/**
+ * Stiahne (alebo vezme z cache) súbor z URL. Vráti { file, hash }, kde hash je odtlačok obsahu
+ * a file je súbor pomenovaný týmto odtlačkom, takže sa pod rukami nikdy nezmení.
+ * Záznam o URL (sidecar .json) sa po `origCacheHours` overuje podmieneným GET: fotka vymenená
+ * pod rovnakou URL dostane nový hash a tým aj nový výrez a nový výstupný obrázok.
+ * Pri výpadku zdroja (sieť, 5xx) sa použije posledná známa verzia.
+ */
+export async function fetchCached(url, kind) {
+  const dir = path.join(config.cacheDir, kind);
+  const metaFile = path.join(dir, sha1(url) + '.json');
+  const blob = (hash) => path.join(dir, 'c-' + hash);
+  const read = async () => {
+    try {
+      const m = JSON.parse(await fs.readFile(metaFile, 'utf8'));
+      return m?.hash && (await exists(blob(m.hash))) ? m : null;
+    } catch { return null; }
+  };
+  const handle = (m, extra) => ({ file: blob(m.hash), hash: m.hash, ...extra });
+  const isFresh = (m) => m && Date.now() - m.checkedAt < config.origCacheHours * 3_600_000;
+
+  const hit = await read();
+  if (isFresh(hit)) return handle(hit);
+  return once(metaFile, async () => {
+    const old = await read(); // iný volajúci ho medzitým mohol dokončiť
+    if (isFresh(old)) return handle(old);
+    // používaná cache nesmie vypadnúť pri upratovaní, ani keď je zdroj dlho nedostupný
+    const useStale = async () => { await Promise.all([touch(blob(old.hash)), touch(metaFile)]); return handle(old, { stale: true }); };
+    const opts = { timeoutMs: 30000, maxBytes: 25 * 1024 * 1024 };
+    const plain = { 'User-Agent': 'FeedBridge/1.0' };
+    const conditional = { ...plain };
+    if (old?.etag) conditional['If-None-Match'] = old.etag;
+    else if (old?.lastModified) conditional['If-Modified-Since'] = old.lastModified;
+    let res;
+    try {
+      res = await safeFetch(url, { ...opts, headers: conditional });
+      // ETag patrí konkrétnej cieľovej adrese; ak presmerovanie teraz vedie inam, 304 nič nehovorí
+      if (res.status === 304 && (!old || res.url !== old.finalUrl)) res = await safeFetch(url, { ...opts, headers: plain });
+    } catch (e) {
+      if (old && e.code !== 'EBLOCKED') return useStale(); // výpadok siete
+      throw e;
+    }
+    if (res.status !== 304 && !res.ok) {
+      // 5xx je dočasný výpadok; 4xx znamená, že fotka zmizla, starú verziu už nepodsúvame
+      if (old && res.status >= 500) return useStale();
+      throw new Error(`Stiahnutie obrázka zlyhalo (${res.status}): ${url}`);
+    }
+    if (res.status === 304 && !old) throw new Error(`Stiahnutie obrázka zlyhalo (304 bez cache): ${url}`);
+    const unchanged = res.status === 304;
+    const hash = unchanged ? old.hash : sha1(res.body);
+    if (unchanged || (await exists(blob(hash)))) await touch(blob(hash));
+    else await writeAtomic(blob(hash), res.body);
+    const meta = {
+      hash,
+      finalUrl: res.url,
+      etag: unchanged ? old.etag : res.headers.get('etag') || '',
+      lastModified: unchanged ? old.lastModified : res.headers.get('last-modified') || '',
+      checkedAt: Date.now(),
+    };
+    await writeAtomic(metaFile, JSON.stringify(meta));
+    return handle(meta);
+  });
+}
+
+// ---------------------------------------------------------------- vyrezanie produktu
+
+/** Lokálne a zadarmo: vyplní od okrajov všetko "takmer biele" a spraví z toho priehľadnosť. */
+async function cutoutWhiteKey(buf, threshold) {
+  // výstup má najviac 2000 px, väčší vstup len zbytočne žerie pamäť pri vypĺňaní
+  const fit = () => untrusted(buf).rotate().resize(2400, 2400, { fit: 'inside', withoutEnlargement: true });
+  const base = fit();
+  const meta = await untrusted(buf).metadata();
+  if (meta.hasAlpha) {
+    const { data: a } = await fit().ensureAlpha().extractChannel(3).raw().toBuffer({ resolveWithObject: true });
+    let transparent = 0;
+    for (let i = 0; i < a.length; i += 97) if (a[i] < 250) transparent++;
+    if (transparent > 20) return fit().png().toBuffer(); // už je vystrihnutý
+  }
+  const { data, info } = await base
+    .flatten({ background: '#ffffff' })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width: w, height: h } = info;
+  const t = threshold;
+  const isBg = (i) => data[i] >= t && data[i + 1] >= t && data[i + 2] >= t;
+  const bg = new Uint8Array(w * h);
+  const stack = new Int32Array(w * h);
+  let sp = 0;
+  const push = (x, y) => {
+    const p = y * w + x;
+    if (bg[p] || !isBg(p * 3)) return;
+    bg[p] = 1;
+    stack[sp++] = p;
+  };
+  for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+  for (let y = 0; y < h; y++) { push(0, y); push(w - 1, y); }
+  while (sp > 0) {
+    const p = stack[--sp];
+    const x = p % w;
+    const y = (p - x) / w;
+    if (x > 0) push(x - 1, y);
+    if (x < w - 1) push(x + 1, y);
+    if (y > 0) push(x, y - 1);
+    if (y < h - 1) push(x, y + 1);
+  }
+  const alpha = Buffer.alloc(w * h);
+  for (let p = 0; p < w * h; p++) alpha[p] = bg[p] ? 0 : 255;
+  // jemné zjemnenie hrany, aby výrez nebol "zubatý"
+  // blur vráti 3 kanály aj pri 1-kanálovom vstupe, preto extractChannel(0)
+  const soft = await sharp(alpha, { raw: { width: w, height: h, channels: 1 } })
+    .blur(0.8)
+    .extractChannel(0)
+    .raw()
+    .toBuffer();
+  return sharp(data, { raw: { width: w, height: h, channels: 3 } })
+    .joinChannel(soft, { raw: { width: w, height: h, channels: 1 } })
+    .png()
+    .toBuffer();
+}
+
+async function cutoutRemoveBg(buf) {
+  if (!config.removeBgKey) throw new Error('Chýba REMOVEBG_API_KEY');
+  const form = new FormData();
+  form.append('image_file', new Blob([buf]), 'image.jpg');
+  form.append('size', 'auto');
+  form.append('format', 'png');
+  const res = await fetch('https://api.remove.bg/v1.0/removebg', {
+    method: 'POST',
+    headers: { 'X-Api-Key': config.removeBgKey },
+    body: form,
+    signal: AbortSignal.timeout(90000),
+  });
+  if (!res.ok) throw new Error(`remove.bg ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function cutoutRembg(buf) {
+  if (!config.rembgUrl) throw new Error('Chýba REMBG_URL (napr. http://rembg:7000/api/remove)');
+  const form = new FormData();
+  form.append('file', new Blob([buf]), 'image.jpg');
+  const res = await fetch(config.rembgUrl, { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
+  if (!res.ok) throw new Error(`rembg ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+function cutoutFile(orig, s) {
+  const provider = s.provider || 'whitekey';
+  const key = sha1(`${orig.hash}|${provider}|${provider === 'whitekey' ? Number(s.whiteThreshold) || 238 : ''}`);
+  return path.join(config.cacheDir, 'cutouts', key + '.png');
+}
+
+/** Výrez produktu (PNG s alfou), cacheovaný podľa obsahu originálu + poskytovateľa. */
+async function getCutout(orig, s) {
+  const provider = s.provider || 'whitekey';
+  const file = cutoutFile(orig, s);
+  if (await exists(file)) return fs.readFile(file);
+  return once(file, async () => {
+    if (await exists(file)) return fs.readFile(file);
+    const src = await fs.readFile(orig.file);
+    let buf;
+    if (provider === 'removebg') buf = await cutoutRemoveBg(src);
+    else if (provider === 'rembg') buf = await cutoutRembg(src);
+    else if (provider === 'none') buf = await untrusted(src).rotate().png().toBuffer();
+    else buf = await cutoutWhiteKey(src, Number(s.whiteThreshold) || 238);
+    await writeAtomic(file, buf);
+    return buf;
+  });
+}
+
+/**
+ * auto: produktová fotka na bielom (alebo už priehľadnom) pozadí sa vystrihne,
+ * lifestyle fotka sa nechá celá a položí sa na pozadie ako karta.
+ */
+async function resolveMode(orig, s) {
+  if (s.mode === 'photo') return 'photo';
+  if (s.mode !== 'auto') return 'cutout';
+  const src = await fs.readFile(orig.file);
+  const meta = await untrusted(src).metadata();
+  const n = 64;
+  if (meta.hasAlpha) {
+    const a = await untrusted(src).rotate().resize(n, n, { fit: 'fill' }).ensureAlpha().extractChannel(3).raw().toBuffer();
+    let clear = 0;
+    for (const v of a) if (v < 250) clear++;
+    if (clear > n) return 'cutout';
+  }
+  const px = await untrusted(src).rotate().flatten({ background: '#ffffff' }).resize(n, n, { fit: 'fill' }).removeAlpha().raw().toBuffer();
+  const t = Number(s.whiteThreshold) || 238;
+  let white = 0, total = 0;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (x > 1 && x < n - 2 && y > 1 && y < n - 2) continue; // len okrajový pás
+      const i = (y * n + x) * 3;
+      total++;
+      if (px[i] >= t && px[i + 1] >= t && px[i + 2] >= t) white++;
+    }
+  }
+  return white / total >= 0.85 ? 'cutout' : 'photo';
+}
+
+// ---------------------------------------------------------------- pozadie
+
+function hex(c, fallback = '#ffffff') {
+  return /^#[0-9a-f]{6}$/i.test(c || '') ? c : fallback;
+}
+
+export function validAssetName(name) {
+  return typeof name === 'string' && /^[a-z0-9][a-z0-9._-]{0,80}\.(jpg|jpeg|png|webp)$/.test(name);
+}
+
+/** Zdrojový súbor obrázkového pozadia (knižnica alebo URL) + odtlačok do cache kľúča. */
+async function backgroundSource(bg) {
+  if (bg?.type !== 'image') return null;
+  if (bg.asset) {
+    if (!validAssetName(bg.asset)) throw new Error(`Neplatný názov pozadia: ${bg.asset}`);
+    const file = path.join(config.assetsDir, bg.asset);
+    let st;
+    try { st = await fs.stat(file); } catch { throw new Error(`Pozadie „${bg.asset}“ v knižnici neexistuje`); }
+    return { file, hash: `asset:${bg.asset}:${st.size}:${Math.round(st.mtimeMs)}` };
+  }
+  if (bg.url) return fetchCached(bg.url, 'bg');
+  return null;
+}
+
+async function makeBackground(bg, size, source) {
+  const type = bg?.type || 'color';
+  if (type === 'gradient') {
+    const angle = ((Number(bg.angle) || 160) * Math.PI) / 180;
+    const x = Math.sin(angle) / 2, y = -Math.cos(angle) / 2;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+      <defs><linearGradient id="g" x1="${0.5 - x}" y1="${0.5 - y}" x2="${0.5 + x}" y2="${0.5 + y}">
+      <stop offset="0" stop-color="${hex(bg.color)}"/><stop offset="1" stop-color="${hex(bg.color2)}"/></linearGradient></defs>
+      <rect width="100%" height="100%" fill="url(#g)"/></svg>`;
+    return sharp(Buffer.from(svg)).jpeg().toBuffer();
+  }
+  if (type === 'image' && source) {
+    return untrusted(await fs.readFile(source.file)).rotate().resize(size, size, { fit: 'cover' }).jpeg().toBuffer();
+  }
+  return sharp({ create: { width: size, height: size, channels: 3, background: hex(bg?.color, '#f4efe9') } })
+    .jpeg()
+    .toBuffer();
+}
+
+function pickBackground(item, s) {
+  for (const b of s.backgrounds || []) {
+    if (b && b.background && testWhen(item, b.when)) return b.background;
+  }
+  return s.background;
+}
+
+// ---------------------------------------------------------------- kompozícia
+
+const clampSize = (s) => Math.min(2000, Math.max(500, Number(s.size) || 1080));
+
+function layout(s) {
+  const size = clampSize(s);
+  const padRaw = Number(s.padding);
+  const pad = Math.min(0.4, Math.max(0, Number.isFinite(padRaw) ? padRaw : 0.1));
+  return { size, box: Math.round(size * (1 - 2 * pad)), offset: Math.round((Number(s.offsetY) || 0) * size) };
+}
+
+const jpeg = (img, s) => img.jpeg({ quality: Math.min(100, Math.max(50, Number(s.quality) || 88)), mozjpeg: true }).toBuffer();
+
+/** Výrez produktu na pozadí, voliteľne s tieňom pod produktom. */
+async function composeCutout(cutoutBuf, bg, s) {
+  const { size, box, offset } = layout(s);
+  const trimmed = await untrusted(cutoutBuf).trim({ threshold: 5 }).toBuffer().catch(() => cutoutBuf);
+  const prod = await untrusted(trimmed).resize(box, box, { fit: 'inside' }).png().toBuffer();
+  const pm = await sharp(prod).metadata();
+  const left = Math.round((size - pm.width) / 2);
+  const top = Math.max(0, Math.min(size - pm.height, Math.round((size - pm.height) / 2 + offset)));
+
+  const layers = [];
+  if (s.shadow) {
+    const sw = Math.round(pm.width * 0.8);
+    const sh = Math.max(12, Math.round(pm.height * 0.07));
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${sw + 80}" height="${sh + 80}">
+      <defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${Math.max(6, sh / 2)}"/></filter></defs>
+      <ellipse cx="${(sw + 80) / 2}" cy="${(sh + 80) / 2}" rx="${sw / 2}" ry="${sh / 2}" fill="#000" fill-opacity="0.28" filter="url(#b)"/></svg>`;
+    layers.push({
+      input: Buffer.from(svg),
+      left: Math.max(0, Math.round((size - (sw + 80)) / 2)),
+      top: Math.max(0, Math.min(size - (sh + 80), Math.round(top + pm.height - sh))),
+    });
+  }
+  layers.push({ input: prod, left, top });
+  return jpeg(sharp(bg).composite(layers), s);
+}
+
+/** Celá fotka ako karta so zaoblenými rohmi (lifestyle zábery, kde výrez nedáva zmysel). */
+async function composePhoto(photoBuf, bg, s) {
+  const { size, box, offset } = layout(s);
+  const raw = await untrusted(photoBuf).rotate().flatten({ background: '#ffffff' }).resize(box, box, { fit: 'inside' }).png().toBuffer();
+  const pm = await sharp(raw).metadata();
+  const r = Math.round(size * 0.03);
+  const mask = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${pm.width}" height="${pm.height}"><rect width="${pm.width}" height="${pm.height}" rx="${r}" ry="${r}"/></svg>`);
+  const card = await sharp(raw).ensureAlpha().composite([{ input: mask, blend: 'dest-in' }]).png().toBuffer();
+  const left = Math.round((size - pm.width) / 2);
+  const top = Math.max(0, Math.min(size - pm.height, Math.round((size - pm.height) / 2 + offset)));
+
+  const layers = [];
+  if (s.shadow) {
+    const blur = Math.round(size * 0.02);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+      <defs><filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="${blur}"/></filter></defs>
+      <rect x="${left}" y="${top + Math.round(size * 0.012)}" width="${pm.width}" height="${pm.height}" rx="${r}" ry="${r}" fill="#000" fill-opacity="0.3" filter="url(#b)"/></svg>`;
+    layers.push({ input: Buffer.from(svg), left: 0, top: 0 });
+  }
+  layers.push({ input: card, left, top });
+  return jpeg(sharp(bg).composite(layers), s);
+}
+
+async function render(orig, item, s, bgSource) {
+  const mode = await resolveMode(orig, s);
+  const bg = await makeBackground(pickBackground(item, s), clampSize(s), bgSource);
+  if (mode === 'photo') return composePhoto(await fs.readFile(orig.file), bg, s);
+  return composeCutout(await getCutout(orig, s), bg, s);
+}
+
+/** Vyrenderuje obrázok bez zapisovania do verejného priečinka (náhľad v UI). */
+export async function renderPreview(url, item, s) {
+  const orig = await fetchCached(url, 'orig');
+  return render(orig, item, s, await backgroundSource(pickBackground(item, s)));
+}
+
+/**
+ * Vyrobí (alebo znovu použije) obrázok pre položku.
+ * Vráti { file, cached } kde file je "slug/hash.jpg".
+ */
+export async function ensureImage(slug, url, item, s) {
+  const bgSpec = pickBackground(item, s);
+  const [orig, bgSource] = await Promise.all([fetchCached(url, 'orig'), backgroundSource(bgSpec)]);
+  const settingsKey = JSON.stringify({
+    src: orig.hash,
+    provider: s.provider,
+    mode: s.mode || 'cutout',
+    th: s.provider === 'whitekey' || s.mode === 'auto' ? s.whiteThreshold : 0,
+    size: s.size, padding: s.padding, offsetY: s.offsetY, shadow: s.shadow, quality: s.quality,
+    bg: bgSpec,
+    bgSrc: bgSource?.hash || '',
+  });
+  const name = sha1(settingsKey).slice(0, 24) + '.jpg';
+  const dir = path.join(config.imagesDir, slug);
+  const file = path.join(dir, name);
+  touch(cutoutFile(orig, s)); // používaný výrez nesmie vypadnúť z cache, aj keď sa práve nečíta
+  if (await exists(file)) return { file: `${slug}/${name}`, cached: true };
+  let created = false; // true len pre volajúceho, ktorý súbor reálne vyrobil
+  await once(file, async () => {
+    if (await exists(file)) return;
+    created = true;
+    await fs.mkdir(dir, { recursive: true });
+    await writeAtomic(file, await render(orig, item, s, bgSource));
+  });
+  return { file: `${slug}/${name}`, cached: !created };
+}
+
+/**
+ * Použitým obrázkom obnoví čas, nepoužívané zmaže až po `retentionDays` od posledného použitia.
+ * Meta môže mať starú URL ešte v načítanom feede, hneď po behu sa preto nič nemaže.
+ */
+export async function pruneImages(slug, usedFiles, retentionDays = config.imageRetentionDays) {
+  const dir = path.join(config.imagesDir, slug);
+  let names = [];
+  try { names = await fs.readdir(dir); } catch { return 0; }
+  const limit = Date.now() - retentionDays * DAY;
+  let removed = 0;
+  for (const n of names) {
+    const file = path.join(dir, n);
+    if (usedFiles.has(`${slug}/${n}`)) { await touch(file); continue; }
+    const st = await fs.stat(file).catch(() => null);
+    if (st && st.mtimeMs < limit) {
+      await fs.rm(file, { force: true });
+      removed++;
+    }
+  }
+  return removed;
+}
+
+/** Zmaže súbory z cache (originály, výrezy, pozadia), ktoré sa dlho nepoužili. */
+export async function pruneCache(retentionDays = config.cacheRetentionDays) {
+  const limit = Date.now() - retentionDays * DAY;
+  let removed = 0;
+  for (const kind of ['orig', 'cutouts', 'bg']) {
+    const dir = path.join(config.cacheDir, kind);
+    for (const n of await fs.readdir(dir).catch(() => [])) {
+      const file = path.join(dir, n);
+      const st = await fs.stat(file).catch(() => null);
+      if (st && st.isFile() && st.mtimeMs < limit) {
+        await fs.rm(file, { force: true });
+        removed++;
+      }
+    }
+  }
+  return removed;
+}
+
+/** Jednoduchý pool s obmedzenou súbežnosťou. */
+export async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= list.length) return;
+      out[i] = await fn(list[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}

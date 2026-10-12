@@ -1,0 +1,47 @@
+# FeedBridge na Hostinger VPS (projekt "feedbridge").
+# Box nemá SSH: nasadzuje sa cez Hostinger Docker-project API z RAW URL tohto súboru,
+# premenné sa posielajú zvlášť v `environment` projektu. Image musí byť na GHCR verejný
+# (na VPS nie je docker login).
+#
+# TLS a smerovanie rieši zdieľaný Traefik v projekte "root": pripájame sa na jeho sieť
+# root_default a smerujeme labelmi. NEPRIDÁVAŤ ďalšiu proxy.
+#
+# Povinné premenné: FEEDBRIDGE_IMAGE, FEEDBRIDGE_HOST, ADMIN_PASSWORD
+# Voliteľné: ADMIN_USER, NOTIFY_WEBHOOK_URL, REMOVEBG_API_KEY, REMBG_URL
+services:
+  feedbridge:
+    image: ${FEEDBRIDGE_IMAGE}
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATA_DIR: /data
+      PUBLIC_URL: https://${FEEDBRIDGE_HOST}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      REMOVEBG_API_KEY: ${REMOVEBG_API_KEY:-}
+      REMBG_URL: ${REMBG_URL:-}
+    volumes:
+      - feedbridge_data:/data
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=root_default
+      - traefik.http.services.feedbridge.loadbalancer.server.port=3000
+      # Host() len pre doménu, ktorá naozaj smeruje na VPS: neúspešné ACME výzvy
+      # míňajú limit Let's Encrypt.
+      - traefik.http.routers.feedbridge.rule=Host(`${FEEDBRIDGE_HOST}`)
+      - traefik.http.routers.feedbridge.entrypoints=web,websecure
+      - traefik.http.routers.feedbridge.tls=true
+      - traefik.http.routers.feedbridge.tls.certresolver=mytlschallenge
+      - traefik.http.routers.feedbridge.service=feedbridge
+
+volumes:
+  feedbridge_data:
+
+networks:
+  proxy:
+    name: root_default
+    external: true
