@@ -13,12 +13,13 @@ Stav k 2026-10-12. Interný nástroj: kontrola nad tým, čo ide z e-shopov do M
 
 ## Neoverené
 
-- Docker build a beh v kontajneri (lokálne nebol spustený, overí ho CI a prvé nasadenie).
 - Import výstupného feedu do reálneho Meta katalógu.
 - Providery `removebg` a `rembg` proti reálnym službám. `rembg` očakáva `POST multipart` s poľom `file`.
 - Pravidlá Mety pre texty a ceny v katalógových obrázkoch (treba overiť pred šablónami s cenou).
 
 ## Nasadenie
+
+Image vydáva CI ako `ghcr.io/<owner>/feedbridge-app:latest` (balík musí byť verejný, server nemá docker login). Overené: build v CI, beh v kontajneri za Traefikom s Let's Encrypt certifikátom, plný beh s reálnym feedom.
 
 Premenné projektu: `FEEDBRIDGE_IMAGE`, `FEEDBRIDGE_HOST`, `ADMIN_PASSWORD`, voliteľne `NOTIFY_WEBHOOK_URL`, `REMOVEBG_API_KEY`, `REMBG_URL`. Doména musí smerovať na server ešte pred prvým štartom, inak Traefik minie pokus o certifikát. Dáta sú v named volume `feedbridge_data` (zálohovať hlavne `feedbridge.db` a `assets/`).
 
