@@ -52,6 +52,14 @@ Dáta: `DATA_DIR/feedbridge.db`, `feeds/<slug>.xml`, `images/<slug>/<hash>.jpg`,
 - Knižnica pozadí: `DATA_DIR/assets`, API `/api/assets` (PUT surové telo, validácia cez sharp). Pozadie `{type:'image', asset:'nazov.jpg'}`.
 - Upozornenia (`src/notify.js`): webhook len pri ZMENE stavu behu (chyba, poistka, zotavenie).
 - Nasadenie: `deploy/compose.yml` (Traefik labels, sieť `root_default`), image z GHCR cez `.github/workflows/ci.yml`.
+- Exportné profily (`config.profiles[]`: id, slug, name, channel `meta|google`, enabled, imageMode `project|original`, rules): jeden beh stiahne zdroj raz a každému zapnutému profilu zapíše vlastný feed `/feeds/<slug profilu>.xml`. Pravidlá = pravidlá projektu + pravidlá profilu, na konci normalizácia a validácia pre kanál (`CHANNELS` v rules.js). Projekt bez profilov dostane pri čítaní predvolený `{id:'main', slug: slug projektu}`, takže stará URL platí ďalej.
+- Slug profilu je po uložení nemenný a jedinečný naprieč všetkými projektmi aj profilmi (`readProfiles`, `slugTaken`). Zmazaný profil = zmazaný feed. Počas behu sa profil ani projekt zmazať nedá (409).
+- Google profil dostáva VŽDY pôvodnú fotku (`imageModeOf`), nikdy vygenerovanú grafiku. Až budú šablóny, čisté šablóny sa môžu povoliť, promo nikdy.
+- Poistka poklesu je na profil. Zastavený profil ostatné nezastaví; výsledok je v `summary.profiles[slug]`, súhrnne `summary.error/guard/guardProfiles`. `runProject` vyhadzuje chybu len pri zlyhaní zdroja. `force` = `true` alebo zoznam slugov.
+- Obrázky zdieľajú všetky profily projektu (`images/<slug projektu>/`); pri upratovaní sa rátajú aj obrázky zo zverejnených feedov profilov, ktoré tento raz nezapísali.
+- História konfigurácie: tabuľka `config_versions` (posledných 30), obnovenie vracia pravidlá a nastavenia, zoznam profilov a ich URL necháva.
+- Magnific API (`src/magnific.js`, `MAGNIFIC_API_KEY`, hlavička `x-magnific-api-key`): provider výrezu `magnific` a generovanie pozadí do knižnice (`POST /api/assets/generate`). API si fotku sťahuje samo z URL a nevie WebP, preto verejná cesta `/src/<odtlačok>.jpg` (originál z cache ako JPEG).
+- Režim `auto`: biely okraj = výrez vždy; pri AI provideroch (rembg, magnific, removebg) aj jednofarebný štúdiový okraj (podiel pixelov okraja blízko mediánu ≥ 0,8). Lifestyle fotka ostáva celá.
 
 ## Pasce (už raz zaúčali)
 

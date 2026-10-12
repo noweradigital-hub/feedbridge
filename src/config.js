@@ -18,6 +18,7 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD || '',
   removeBgKey: process.env.REMOVEBG_API_KEY || '',
   rembgUrl: process.env.REMBG_URL || '',
+  magnificKey: process.env.MAGNIFIC_API_KEY || '', // provider "magnific" + generovanie pozadí do knižnice
   imageConcurrency: Number(process.env.IMAGE_CONCURRENCY || 3),
   // Meta si obrázky sťahuje až po načítaní feedu, staré URL preto musia ešte chvíľu žiť
   imageRetentionDays: Number(process.env.IMAGE_RETENTION_DAYS || 7),
@@ -42,10 +43,11 @@ fs.mkdirSync(path.join(config.cacheDir, 'bg'), { recursive: true });
 /** Predvolená konfigurácia projektu (ukladá sa ako JSON v DB). */
 export function defaultProjectConfig() {
   return {
+    profiles: [], // doplní normalizeProfiles: aspoň jeden profil so slugom projektu
     rules: [],
     images: {
       enabled: false,
-      provider: 'whitekey', // whitekey | removebg | rembg | none
+      provider: 'whitekey', // whitekey | rembg | magnific | removebg | none
       mode: 'cutout', // cutout = výrez na pozadí | photo = celá fotka ako karta | auto = podľa okrajov fotky
       whiteThreshold: 238,
       size: 1080,

@@ -21,7 +21,7 @@ const { ensureImage, pruneImages, pruneCache, renderPreview, fetchCached } = awa
 const { safeFetch, isPublicAddress } = await import('../src/net.js');
 const { notifyRun } = await import('../src/notify.js');
 const { config } = await import('../src/config.js');
-const { runs, recoverStaleRuns } = await import('../src/db.js');
+const { runs, recoverStaleRuns, versions, default: db } = await import('../src/db.js');
 
 // --- syntetické obrázky: farebný "produkt" na bielom pozadí
 async function productJpg(color) {
@@ -219,14 +219,22 @@ console.log('Poistka poklesu');
 const feedFile = path.join(tmp, 'feeds', 'test-demo.xml');
 const before = fs.readFileSync(feedFile, 'utf8');
 const excludeAll = { type: 'exclude', when: [] };
+// poistka už nevyhadzuje chybu z celého behu: profil ostane pri starom feede a beh to nahlási
+const guardBlocks = async (proj, re) => {
+  const s = await runProject(proj);
+  assert.ok(s.guard, 'beh mal byť zastavený poistkou');
+  assert.match(s.error, re);
+  assert.deepEqual(s.guardProfiles, ['test-demo']);
+  assert.equal(s.written, 0);
+};
 await t('pravidlo, ktoré vylúči všetko, feed neprepíše', async () => {
-  await assert.rejects(runProject({ ...project, config: { ...project.config, rules: [excludeAll] } }), (e) => e.guard && /žiadna položka/.test(e.message));
+  await guardBlocks({ ...project, config: { ...project.config, rules: [excludeAll] } }, /žiadna položka/);
   assert.equal(fs.readFileSync(feedFile, 'utf8'), before);
 });
 const dropOne = { type: 'exclude', when: [{ field: 'id', op: 'eq', value: '001' }] };
 await t('pokles nad limit (2 -> 1 pri 40 %) feed neprepíše', async () => {
   const cfg = { ...project.config, rules: [dropOne, ...project.config.rules], safety: { maxDropPct: 40 } };
-  await assert.rejects(runProject({ ...project, config: cfg }), (e) => e.guard && /pokles o 50 %/.test(e.message));
+  await guardBlocks({ ...project, config: cfg }, /pokles o 50 %/);
   assert.equal(fs.readFileSync(feedFile, 'utf8'), before);
 });
 await t('pokles v limite (50 %) a 0 = vypnuté prejde', async () => {
@@ -246,9 +254,9 @@ await t('force zapíše aj prázdny feed', async () => {
 
 await t('pravidlo, ktoré dá všetkým rovnaké id, poistka zastaví (unikátne ID, nie riadky)', async () => {
   const cfg = { ...project.config, rules: [...project.config.rules, { type: 'set', field: 'id', value: 'X' }], safety: { maxDropPct: 40 } };
-  await assert.rejects(runProject({ ...project, config: cfg }), (e) => e.guard && /1 unikátnych ID oproti 2/.test(e.message));
+  await guardBlocks({ ...project, config: cfg }, /1 unikátnych ID oproti 2/);
   const noId = { ...project.config, rules: [...project.config.rules, { type: 'remove', field: 'id' }] };
-  await assert.rejects(runProject({ ...project, config: noId }), (e) => e.guard);
+  await guardBlocks({ ...project, config: noId }, /žiadna položka/);
   assert.equal(fs.readFileSync(feedFile, 'utf8'), before);
 });
 await t('podmienka availability platí v Google aj Meta zápise', () => {
@@ -266,6 +274,89 @@ await t('náhľad hlási duplicitné id rovnako ako beh', async () => {
   assert.equal(d.invalid, 1);
   assert.ok(d.rows.some((r) => r.issues.includes('duplicitné id "X"')));
 });
+
+console.log('Exportné profily');
+const multi = {
+  ...project,
+  config: {
+    ...project.config,
+    profiles: [
+      project.config.profiles[0],
+      { id: 'goog', slug: 'test-demo-google', name: 'Google', channel: 'google', enabled: true, imageMode: 'project', rules: [{ type: 'set', field: 'title', value: '{title} | Google' }] },
+      { id: 'clean', slug: 'test-demo-clean', name: 'Meta čistý', channel: 'meta', enabled: true, imageMode: 'original', rules: [{ type: 'exclude', when: [{ field: 'id', op: 'eq', value: '003' }] }] },
+      { id: 'off', slug: 'test-demo-off', name: 'Vypnutý', channel: 'meta', enabled: false, imageMode: 'project', rules: [] },
+    ],
+  },
+};
+await t('projekt bez profilov dostane predvolený so slugom projektu (pôvodná URL ostáva)', () => {
+  assert.deepEqual(project.config.profiles.map((p) => [p.id, p.slug, p.channel]), [['main', 'test-demo', 'meta']]);
+});
+const ms = await runProject(multi, () => {});
+const readOut = (slug) => parseFeed(fs.readFileSync(path.join(tmp, 'feeds', `${slug}.xml`), 'utf8')).items;
+await t('jeden beh zapíše feed pre každý zapnutý profil, vypnutý nie', () => {
+  assert.deepEqual(Object.keys(ms.profiles), ['test-demo', 'test-demo-google', 'test-demo-clean']);
+  assert.equal(ms.error, undefined);
+  assert.equal(ms.profiles['test-demo'].written, 2);
+  assert.equal(ms.profiles['test-demo-google'].written, 2);
+  assert.equal(ms.profiles['test-demo-clean'].written, 1);
+  assert.equal(ms.written, 5);
+  assert.ok(!fs.existsSync(path.join(tmp, 'feeds', 'test-demo-off.xml')));
+});
+await t('Google profil: pôvodná fotka, hodnoty v Google formáte, vlastné pravidlo profilu', () => {
+  const g = readOut('test-demo-google');
+  assert.ok(g[0].image_link.startsWith(base), g[0].image_link); // nikdy vygenerovaný obrázok
+  assert.equal(g[0].availability, 'in_stock');
+  assert.match(g[0].title, / \| Google$/);
+  assert.ok(!readOut('test-demo')[0].title.includes('Google')); // pravidlo profilu neovplyvní iný profil
+});
+await t('Meta profil s pôvodnými fotkami a vlastným vylúčením', () => {
+  const c = readOut('test-demo-clean');
+  assert.equal(c.length, 1);
+  assert.ok(c[0].image_link.startsWith(base));
+  assert.equal(c[0].availability, 'in stock');
+});
+await t('Google validácia: iné limity, Meta polia preč, predobjednávka bez dátumu je upozornenie', () => {
+  const { item, changed } = applyRules({ availability: 'available for order', status: 'active', quantity_to_sell_on_facebook: '3', additional_image_link: Array.from({ length: 14 }, (_, i) => `u${i}`) }, [], 'google');
+  assert.equal(item.availability, 'backorder');
+  assert.ok(!('status' in item) && !('quantity_to_sell_on_facebook' in item));
+  assert.equal(item.additional_image_link.length, 10);
+  assert.ok(changed.includes('status'));
+  const ok = { id: '1', title: 't', description: 'd', link: 'l', image_link: 'i', price: '1.00 EUR', availability: 'backorder', brand: 'B' };
+  assert.deepEqual(checkItem(ok, 'google'), { errors: ['chýba availability_date (Google ho pri predobjednávke a tovare na objednávku vyžaduje)'], warnings: [] });
+  assert.deepEqual(checkItem({ ...ok, availability_date: '2026-11-01T00:00+01:00' }, 'google').errors, []);
+  assert.deepEqual(checkItem({ ...ok, title: 'x'.repeat(151), availability: 'in stock' }, 'google').errors, ['title > 150 znakov', 'availability "in stock" nie je platná hodnota']);
+  assert.deepEqual(checkItem({ ...ok, availability: 'in stock', condition: 'new', title: 'x'.repeat(151) }, 'meta').errors, []);
+  assert.deepEqual(checkItem({ ...ok, price: '12.50', availability: 'in_stock' }, 'google').errors, ['price bez meny']);
+});
+await t('poistka zastaví len dotknutý profil, ostatné sa zapíšu; force len pre vymenovaný', async () => {
+  const beforeG = fs.readFileSync(path.join(tmp, 'feeds', 'test-demo-google.xml'), 'utf8');
+  const cfg = structuredClone(multi.config);
+  cfg.profiles[1].rules.push({ type: 'exclude', when: [] }); // Google profil vylúči všetko
+  const s = await runProject({ ...multi, config: cfg }, () => {});
+  assert.equal(s.guard, true);
+  assert.deepEqual(s.guardProfiles, ['test-demo-google']);
+  assert.match(s.error, /^test-demo-google: Poistka/);
+  assert.equal(s.profiles['test-demo'].written, 2);
+  assert.equal(fs.readFileSync(path.join(tmp, 'feeds', 'test-demo-google.xml'), 'utf8'), beforeG);
+  const forcedOther = await runProject({ ...multi, config: cfg }, () => {}, { force: ['test-demo'] });
+  assert.equal(forcedOther.guard, true); // odpustenie inému profilu nepomôže
+  const forced = await runProject({ ...multi, config: cfg }, () => {}, { force: ['test-demo-google'] });
+  assert.equal(forced.error, undefined);
+  assert.equal(readOut('test-demo-google').length, 0);
+});
+await t('obrázky profilu, ktorý tento raz nezapísal, sa nepovažujú za nepoužívané', async () => {
+  // hlavný profil je zastavený poistkou, jeho zverejnený feed stále odkazuje na vygenerované obrázky
+  const cfg = structuredClone(multi.config);
+  cfg.profiles = [{ ...cfg.profiles[0], rules: [{ type: 'exclude', when: [] }] }];
+  const dir = path.join(tmp, 'images', 'test-demo');
+  const past = new Date(Date.now() - 30 * 86_400_000);
+  const referenced = readOut('test-demo').map((it) => path.basename(it.image_link));
+  for (const n of fs.readdirSync(dir)) fs.utimesSync(path.join(dir, n), past, past);
+  const s = await runProject({ ...multi, config: cfg }, () => {});
+  assert.equal(s.guard, true);
+  for (const n of referenced) assert.ok(fs.existsSync(path.join(dir, n)), `zmazaný používaný obrázok ${n}`);
+});
+for (const slug of ['test-demo-google', 'test-demo-clean']) fs.rmSync(path.join(tmp, 'feeds', `${slug}.xml`), { force: true });
 
 console.log('Súbežné obrázky');
 await t('varianty so spoločnou fotkou: 1 stiahnutie, 1 vygenerovaný, zvyšok cache', async () => {
@@ -439,6 +530,20 @@ await t('webhook len pri zmene stavu: chyba raz, opakovaná nie, zotavenie áno'
   assert.equal(hooks[0].project.slug, 'demo');
   assert.match(hooks[0].message, /HTTP 500/);
   assert.match(hooks[0].feed_url, /\/feeds\/demo\.xml$/);
+});
+
+console.log('Projekt z čias pred profilmi a históriou');
+await t('starý záznam bez profilov a bez histórie: URL ostáva, prvá úprava odloží aj pôvodný stav', () => {
+  const legacy = { rules: [{ type: 'remove', field: 'mpn' }], images: { enabled: false } }; // presne ako ukladala staršia verzia
+  const id = Number(db.prepare('INSERT INTO projects (name, slug, config) VALUES (?,?,?)').run('Starý', 'stary-eshop', JSON.stringify(legacy)).lastInsertRowid);
+  const before = projects.get(id);
+  assert.deepEqual(before.config.profiles.map((p) => [p.id, p.slug, p.channel, p.imageMode]), [['main', 'stary-eshop', 'meta', 'project']]);
+  assert.equal(versions.list(id).length, 0);
+  projects.update(id, { ...before, config: { ...before.config, rules: [] } });
+  const list = versions.list(id);
+  assert.deepEqual(list.map((v) => v.rules), [0, 1]); // najnovšia prvá, pôvodný stav sa nestratil
+  assert.deepEqual(projects.get(id).config.profiles.map((p) => p.slug), ['stary-eshop']);
+  projects.remove(id);
 });
 
 console.log('Reštart');

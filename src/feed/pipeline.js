@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { parseFeed } from './parse.js';
-import { applyRules, checkItem, fieldValue } from './rules.js';
+import { applyRules, checkItem, fieldValue, channelOf, CHANNELS } from './rules.js';
 import { buildFeedXml } from './xml.js';
 import { ensureImage, pruneImages, mapLimit } from '../images.js';
 import { safeFetch } from '../net.js';
@@ -18,18 +18,34 @@ export async function fetchSource(url) {
   return res.body.toString('utf8');
 }
 
-/** Len pravidlá, bez obrázkov - pre náhľad v UI. */
-export async function previewProject(project, { limit = 60 } = {}) {
+/** Zapnuté exportné profily projektu (každý = jeden výstupný feed s vlastnou URL). */
+export function activeProfiles(project) {
+  return (project.config.profiles || []).filter((p) => p.enabled !== false);
+}
+
+/** Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka. */
+export function imageModeOf(profile) {
+  return channelOf(profile.channel) === 'google' ? 'original' : profile.imageMode === 'original' ? 'original' : 'project';
+}
+
+const rulesFor = (project, profile) => [...(project.config.rules || []), ...(profile.rules || [])];
+
+/** Len pravidlá, bez obrázkov - pre náhľad v UI. `profile` = slug profilu, inak prvý. */
+export async function previewProject(project, { limit = 60, profile: slug } = {}) {
+  const all = project.config.profiles || [];
+  const profile = all.find((p) => p.slug === slug) || all[0];
+  if (!profile) throw new Error('Projekt nemá žiadny exportný profil');
   const xml = await fetchSource(project.source_url);
   const { items } = parseFeed(xml);
+  const rules = rulesFor(project, profile);
   const rows = [];
   let excluded = 0;
   let invalid = 0;
   const seen = new Set();
   for (const original of items) {
-    const { item, excluded: ex, changed } = applyRules(original, project.config.rules);
+    const { item, excluded: ex, changed } = applyRules(original, rules, profile.channel);
     if (ex) { excluded++; }
-    const { errors: issues, warnings: notes } = ex ? { errors: [], warnings: [] } : checkItem(item);
+    const { errors: issues, warnings: notes } = ex ? { errors: [], warnings: [] } : checkItem(item, profile.channel);
     if (!ex) {
       const id = fieldValue(item, 'id').trim();
       if (id && seen.has(id)) issues.push(`duplicitné id "${id}"`);
@@ -40,7 +56,7 @@ export async function previewProject(project, { limit = 60 } = {}) {
       rows.push({ original, result: ex ? null : item, excluded: ex, changed, issues, notes });
     }
   }
-  return { total: items.length, excluded, invalid, rows };
+  return { total: items.length, excluded, invalid, rows, profile: profile.slug, channel: channelOf(profile.channel) };
 }
 
 export class GuardError extends Error {
@@ -79,15 +95,88 @@ async function checkDropGuard(count, file, safety, log) {
   if (drop > 0) log(`Pokles oproti poslednému feedu: ${prev} → ${count} (${drop} %, limit ${maxDrop} %)`);
 }
 
-/** Plný beh: stiahni, spracuj, vygeneruj obrázky, zapíš feed. force = obíď poistku poklesu. */
-export async function runProject(project, log = () => {}, { force = false } = {}) {
-  const summary = {
-    total: 0, excluded: 0, written: 0, invalid: 0, notes: 0,
-    images: { generated: 0, cached: 0, failed: 0, skipped: 0 },
-    warnings: [],
-  };
+const emptyImages = () => ({ generated: 0, cached: 0, failed: 0, skipped: 0 });
+
+/** Obrázky, na ktoré odkazuje práve zverejnený feed (aby ich upratovanie nezmazalo, keď profil tento raz nezapísal). */
+async function publishedImages(file) {
+  const out = new Set();
+  let xml;
+  try { xml = await fs.readFile(file, 'utf8'); } catch { return out; }
+  const prefix = `${config.publicUrl}/img/`;
+  for (const m of xml.matchAll(/<g:image_link>([^<]+)<\/g:image_link>/g)) {
+    if (m[1].startsWith(prefix)) out.add(m[1].slice(prefix.length));
+  }
+  return out;
+}
+
+/** Jeden profil: pravidlá projektu + profilu, poistka, obrázky, validácia pre kanál, atomický zápis. */
+async function runProfile(project, profile, items, channel, ps, used, log, forced) {
   const cfg = project.config;
-  const slug = project.slug;
+  const file = path.join(config.feedsDir, `${profile.slug}.xml`);
+  const rules = rulesFor(project, profile);
+  const processed = [];
+  for (const original of items) {
+    const { item, excluded } = applyRules(original, rules, profile.channel);
+    if (excluded) { ps.excluded++; continue; }
+    processed.push(item);
+  }
+  log(`Po pravidlách: ${processed.length} položiek (vylúčených ${ps.excluded})`);
+  if (forced) log('Poistka poklesu vypnutá (spustené s potvrdením)');
+  else await checkDropGuard(distinctIds(processed), file, cfg.safety, log); // pred obrázkami, nech sa neplatí výrez zbytočne
+
+  const img = cfg.images;
+  if (img.enabled && imageModeOf(profile) === 'project') {
+    log(`Spracúvam obrázky (provider: ${img.provider}, súbežne ${config.imageConcurrency})`);
+    await mapLimit(processed, config.imageConcurrency, async (item) => {
+      const url = fieldValue(item, 'image_link');
+      if (!url) { ps.images.skipped++; return; }
+      try {
+        const { file: out, cached } = await ensureImage(project.slug, url, item, img);
+        used.add(out);
+        if (cached) ps.images.cached++; else ps.images.generated++;
+        if (img.keepOriginalAsAdditional) {
+          const extra = Array.isArray(item.additional_image_link) ? item.additional_image_link : [];
+          item.additional_image_link = [url, ...extra.filter((u) => u !== url)].slice(0, CHANNELS[channelOf(profile.channel)].additionalImages);
+        }
+        item.image_link = `${config.publicUrl}/img/${out}`;
+      } catch (e) {
+        ps.images.failed++;
+        if (ps.warnings.length < 50) ps.warnings.push(`Obrázok ${fieldValue(item, 'id')}: ${e.message}`);
+      }
+    });
+    log(`Obrázky: nových ${ps.images.generated}, z cache ${ps.images.cached}, chýb ${ps.images.failed}`);
+  }
+
+  const seen = new Set();
+  for (const item of processed) {
+    const { errors, warnings } = checkItem(item, profile.channel);
+    const id = fieldValue(item, 'id').trim();
+    if (id && seen.has(id)) errors.push(`duplicitné id "${id}"`);
+    seen.add(id);
+    if (errors.length) ps.invalid++;
+    if (warnings.length) ps.notes++;
+    if ((errors.length || warnings.length) && ps.warnings.length < 50) {
+      ps.warnings.push(`Položka ${id || '?'}: ${[...errors, ...warnings.map((w) => `${w} (odporúčané)`)].join(', ')}`);
+    }
+  }
+  const out = buildFeedXml(channel, processed);
+  await fs.writeFile(file + '.tmp', out);
+  await fs.rename(file + '.tmp', file);
+  ps.written = processed.length;
+  log(`Feed zapísaný: ${processed.length} položiek, ${(out.length / 1024).toFixed(0)} kB`);
+}
+
+/**
+ * Plný beh: zdroj sa stiahne raz a každý zapnutý profil z neho dostane vlastný feed.
+ * Zlyhanie zdroja vyhodí chybu (nič sa neprepíše). Zlyhanie jedného profilu (napr. poistka)
+ * ostatné nezastaví: je v summary.profiles[slug].error a súhrnne v summary.error / summary.guard.
+ * force = true (všetky profily) alebo pole slugov, ktorým sa má poistka poklesu odpustiť.
+ */
+export async function runProject(project, log = () => {}, { force = false } = {}) {
+  const profiles = activeProfiles(project);
+  if (!profiles.length) throw new Error('Projekt nemá žiadny zapnutý exportný profil');
+  const isForced = (slug) => force === true || (Array.isArray(force) && force.includes(slug));
+  const summary = { total: 0, excluded: 0, written: 0, invalid: 0, notes: 0, images: emptyImages(), warnings: [], profiles: {} };
 
   log(`Sťahujem zdrojový feed: ${project.source_url}`);
   const xml = await fetchSource(project.source_url);
@@ -96,66 +185,38 @@ export async function runProject(project, log = () => {}, { force = false } = {}
   log(`Načítaných položiek: ${items.length}`);
   if (!items.length) throw new Error('Zdrojový feed neobsahuje žiadne položky - feed neprepisujem.');
 
-  // 1) pravidlá
-  const processed = [];
-  for (const original of items) {
-    const { item, excluded } = applyRules(original, cfg.rules);
-    if (excluded) { summary.excluded++; continue; }
-    processed.push({ item, original });
-  }
-  log(`Po pravidlách: ${processed.length} položiek (vylúčených ${summary.excluded})`);
-  const file = path.join(config.feedsDir, `${slug}.xml`);
-  if (force) log('Poistka poklesu vypnutá (spustené s potvrdením)');
-  else await checkDropGuard(distinctIds(processed.map((p) => p.item)), file, cfg.safety, log); // pred obrázkami, nech sa neplatí remove.bg zbytočne
-
-  // 2) obrázky
   const used = new Set();
-  const img = cfg.images;
-  if (img.enabled) {
-    log(`Spracúvam obrázky (provider: ${img.provider}, súbežne ${config.imageConcurrency})`);
-    await mapLimit(processed, config.imageConcurrency, async ({ item }) => {
-      const url = fieldValue(item, 'image_link');
-      if (!url) { summary.images.skipped++; return; }
-      try {
-        const { file, cached } = await ensureImage(slug, url, item, img);
-        used.add(file);
-        if (cached) summary.images.cached++; else summary.images.generated++;
-        if (img.keepOriginalAsAdditional) {
-          const extra = Array.isArray(item.additional_image_link) ? item.additional_image_link : [];
-          item.additional_image_link = [url, ...extra.filter((u) => u !== url)].slice(0, 10);
-        }
-        item.image_link = `${config.publicUrl}/img/${file}`;
-      } catch (e) {
-        summary.images.failed++;
-        if (summary.warnings.length < 50) summary.warnings.push(`Obrázok ${fieldValue(item, 'id')}: ${e.message}`);
-      }
-    });
-    log(`Obrázky: nových ${summary.images.generated}, z cache ${summary.images.cached}, chýb ${summary.images.failed}`);
-  }
-
-  // 3) validácia a zápis
-  const seen = new Set();
-  for (const { item } of processed) {
-    const { errors, warnings } = checkItem(item);
-    const id = fieldValue(item, 'id').trim();
-    if (id && seen.has(id)) errors.push(`duplicitné id "${id}"`);
-    seen.add(id);
-    if (errors.length) summary.invalid++;
-    if (warnings.length) summary.notes++;
-    if ((errors.length || warnings.length) && summary.warnings.length < 50) {
-      summary.warnings.push(`Položka ${fieldValue(item, 'id') || '?'}: ${[...errors, ...warnings.map((w) => `${w} (odporúčané)`)].join(', ')}`);
+  const many = profiles.length > 1;
+  for (const profile of profiles) {
+    const ps = { name: profile.name, channel: channelOf(profile.channel), excluded: 0, written: 0, invalid: 0, notes: 0, images: emptyImages(), warnings: [] };
+    summary.profiles[profile.slug] = ps;
+    const plog = many ? (m) => log(`[${profile.slug}] ${m}`) : log;
+    try {
+      await runProfile(project, profile, items, channel, ps, used, plog, isForced(profile.slug));
+    } catch (e) {
+      ps.error = e.message;
+      if (e.guard) ps.guard = true;
+      plog(`CHYBA: ${e.message}`);
+      // profil ostáva pri starom feede, jeho obrázky sa preto stále používajú
+      for (const f of await publishedImages(path.join(config.feedsDir, `${profile.slug}.xml`))) used.add(f);
     }
+    for (const k of ['excluded', 'written', 'invalid', 'notes']) summary[k] += ps[k];
+    for (const k of Object.keys(summary.images)) summary.images[k] += ps.images[k];
+    for (const w of ps.warnings) if (summary.warnings.length < 80) summary.warnings.push(many ? `[${profile.slug}] ${w}` : w);
   }
-  const out = buildFeedXml(channel, processed.map((p) => p.item));
-  await fs.writeFile(file + '.tmp', out);
-  await fs.rename(file + '.tmp', file);
-  summary.written = processed.length;
-  log(`Feed zapísaný: ${processed.length} položiek, ${(out.length / 1024).toFixed(0)} kB`);
+  // profily, ktoré sú vypnuté, ale majú zverejnený feed, si svoje obrázky tiež držia
+  for (const p of project.config.profiles || []) {
+    if (p.enabled === false) for (const f of await publishedImages(path.join(config.feedsDir, `${p.slug}.xml`))) used.add(f);
+  }
 
-  {
-    // aj pri vypnutých obrázkoch: staré súbory doslúžia retenčnú dobu a potom zmiznú
-    const removed = await pruneImages(slug, used, config.imageRetentionDays);
-    if (removed) log(`Zmazaných ${removed} obrázkov nepoužívaných dlhšie než ${config.imageRetentionDays} dní`);
+  const removed = await pruneImages(project.slug, used, config.imageRetentionDays);
+  if (removed) log(`Zmazaných ${removed} obrázkov nepoužívaných dlhšie než ${config.imageRetentionDays} dní`);
+
+  const failed = Object.entries(summary.profiles).filter(([, p]) => p.error);
+  if (failed.length) {
+    summary.error = failed.map(([slug, p]) => (many ? `${slug}: ${p.error}` : p.error)).join(' | ');
+    const guarded = failed.filter(([, p]) => p.guard).map(([slug]) => slug);
+    if (guarded.length) { summary.guard = true; summary.guardProfiles = guarded; }
   }
   return summary;
 }

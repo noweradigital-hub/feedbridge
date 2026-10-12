@@ -8,12 +8,14 @@ const FIELDS = ['id', 'title', 'description', 'link', 'image_link', 'additional_
 const OPS = { eq: 'sa rovná', neq: 'nerovná sa', contains: 'obsahuje', ncontains: 'neobsahuje', regex: 'regex',
   empty: 'je prázdne', nempty: 'nie je prázdne', gt: '>', lt: '<', gte: '≥', lte: '≤', in: 'je jedno z (a,b,c)' };
 
+const CHANNELS = { meta: 'Meta', google: 'Google' };
+
 const RULE_TYPES = {
   set: 'Nastaviť pole (šablóna)', exclude: 'Vylúčiť produkt', replace: 'Nájsť a nahradiť', clean_html: 'Vyčistiť HTML',
   truncate: 'Skrátiť text', price: 'Upraviť cenu', remove: 'Odstrániť pole',
 };
 
-const state = { projects: [], cur: null, tab: 'settings', dirty: false, preview: null, runs: [], pollTimer: null, assets: [], output: null };
+const state = { projects: [], cur: null, tab: 'settings', dirty: false, preview: null, runs: [], pollTimer: null, assets: [], output: null, viewProfile: null, versions: null };
 
 // ------------------------------------------------------------------ helpers
 function h(tag, attrs = {}, ...kids) {
@@ -97,12 +99,13 @@ function renderEmpty() {
 async function openProject(id) {
   if (state.dirty && state.cur && state.cur.id !== id && !confirm('Máš neuložené zmeny. Zahodiť ich?')) return;
   state.cur = await api('/projects/' + id);
-  state.dirty = false; state.preview = null; state.runs = []; state.output = null;
+  state.dirty = false; state.preview = null; state.runs = []; state.output = null; state.viewProfile = null; state.versions = null;
   state.tab = state.tab || 'settings';
   document.querySelectorAll('.proj').forEach((el, i) => el.classList.toggle('active', state.projects[i]?.id === id));
   render();
   if (state.tab === 'output') loadOutput();
   if (state.tab === 'runs') loadRuns();
+  if (state.tab === 'settings') loadVersions();
   if (state.cur.running) pollRuns();
 }
 
@@ -124,7 +127,7 @@ function render() {
   const p = state.cur;
   const main = document.getElementById('main');
   if (!p) return renderEmpty();
-  const tabs = { settings: 'Zdroj a plán', rules: `Pravidlá (${p.config.rules.length})`, images: 'Obrázky', preview: 'Náhľad', output: 'Výstup', runs: 'Behy' };
+  const tabs = { settings: 'Zdroj a plán', rules: `Pravidlá (${p.config.rules.length})`, profiles: `Profily (${p.config.profiles.length})`, images: 'Obrázky', preview: 'Náhľad', output: 'Výstup', runs: 'Behy' };
   const status = p.last_status ? h('span', { class: 'tag ' + p.last_status }, p.last_status) : null;
   main.replaceChildren(
     h('div', { class: 'head' },
@@ -134,21 +137,24 @@ function render() {
       h('button', { class: 'btn danger', onclick: remove }, 'Zmazať'),
       h('button', { class: 'btn', id: 'run-btn', onclick: () => runNow(), disabled: p.running }, p.running ? 'Beží…' : 'Spustiť teraz'),
       h('button', { class: 'btn primary', id: 'save-btn', onclick: save, disabled: !state.dirty }, 'Uložiť')),
-    h('div', { class: 'feedurl' }, h('span', { class: 'muted' }, 'URL pre Metu:'), h('code', {}, p.feed_url),
-      h('button', { class: 'btn small', onclick: () => { navigator.clipboard.writeText(p.feed_url); toast('Skopírované'); } }, 'Kopírovať'),
-      p.has_feed ? null : h('span', { class: 'muted' }, '(feed ešte nebol vygenerovaný)')),
+    ...p.config.profiles.filter((pr) => pr.feed_url).map((pr) => h('div', { class: 'feedurl' },
+      h('span', { class: 'tag' }, CHANNELS[pr.channel]), h('span', { class: 'muted' }, `${pr.name}:`), h('code', {}, pr.feed_url),
+      h('button', { class: 'btn small', onclick: () => { navigator.clipboard.writeText(pr.feed_url); toast('Skopírované'); } }, 'Kopírovať'),
+      pr.enabled === false ? h('span', { class: 'tag warning' }, 'vypnutý') : null,
+      pr.has_feed ? null : h('span', { class: 'muted' }, '(feed ešte nebol vygenerovaný)'))),
     h('div', { class: 'tabs' }, Object.entries(tabs).map(([k, t]) =>
-      h('button', { class: 'tab' + (state.tab === k ? ' active' : ''), onclick: () => { state.tab = k; render(); if (k === 'runs') loadRuns(); if (k === 'output') loadOutput(); } }, t))),
-    h('div', { id: 'tab-body' }, ({ settings: tabSettings, rules: tabRules, images: tabImages, preview: tabPreview, output: tabOutput, runs: tabRuns })[state.tab]()));
+      h('button', { class: 'tab' + (state.tab === k ? ' active' : ''), onclick: () => { state.tab = k; render(); if (k === 'runs') loadRuns(); if (k === 'output') loadOutput(); if (k === 'settings') loadVersions(); } }, t))),
+    h('div', { id: 'tab-body' }, ({ settings: tabSettings, rules: tabRules, profiles: tabProfiles, images: tabImages, preview: tabPreview, output: tabOutput, runs: tabRuns })[state.tab]()));
 }
 
 async function save() {
   try {
     const p = state.cur;
     state.cur = await api('/projects/' + p.id, { method: 'PUT', body: p });
-    state.dirty = false;
+    state.dirty = false; state.versions = null;
     await loadProjects();
     render();
+    if (state.tab === 'settings') loadVersions();
     toast('Uložené');
   } catch (e) { toast(e.message, true); }
 }
@@ -160,7 +166,7 @@ async function runNow(force = false, projectId = state.cur?.id) {
     if (state.dirty) return; // uloženie zlyhalo, nespúšťaj beh so starou konfiguráciou
   }
   try {
-    await api(`/projects/${projectId}/run`, { method: 'POST', body: force === true ? { force: true } : {} });
+    await api(`/projects/${projectId}/run`, { method: 'POST', body: force ? { force } : {} });
     state.cur.running = true; render(); toast('Beh spustený'); pollRuns();
   } catch (e) { toast(e.message, true); }
 }
@@ -186,12 +192,15 @@ function pollRuns() {
     if (!fresh.running) {
       clearInterval(state.pollTimer);
       Object.assign(state.cur, { running: false, last_status: fresh.last_status, last_summary: fresh.last_summary, has_feed: fresh.has_feed });
+      for (const pr of state.cur.config.profiles) { const f = fresh.config.profiles.find((x) => x.id === pr.id); if (f) pr.has_feed = f.has_feed; }
       state.output = null;
       render(); loadProjects();
       if (state.tab === 'output') loadOutput();
       toast(fresh.last_status === 'error' ? 'Beh skončil chybou' : 'Beh dokončený', fresh.last_status === 'error');
       // poistka poklesu: zápis až po výslovnom potvrdení
-      if (fresh.last_summary?.guard && confirm(`${state.cur.name}: ${fresh.last_summary.error}\n\nZapísať feed aj tak? Meta odstráni produkty, ktoré v ňom chýbajú.`)) runNow(true, projectId);
+      // odpustí sa len profilom, ktoré poistka zastavila
+      const blocked = fresh.last_summary?.guardProfiles || [];
+      if (fresh.last_summary?.guard && confirm(`${state.cur.name}: ${fresh.last_summary.error}\n\nZapísať feed aj tak? Kanál odstráni produkty, ktoré v ňom chýbajú.`)) runNow(blocked.length ? blocked : true, projectId);
     }
   }, 2500);
 }
@@ -207,7 +216,34 @@ function tabSettings() {
       textInput('Aktualizovať každých (minút, 15-1440)', p, 'interval_minutes', { type: 'number' }),
       textInput('Poistka: max. pokles položiek oproti minulému feedu (%, 0 = vypnuté)', p.config.safety, 'maxDropPct', { type: 'number' }),
       checkInput('Automatické spúšťanie zapnuté', p, 'enabled'))),
-    h('p', { class: 'muted' }, 'Meta si v Commerce Manageri (Zdroje dát → Naplánovaný feed) nastaví URL hore. FeedBridge ju každých N minút prepočíta zo zdrojového feedu; ak zdroj zlyhá, posledný dobrý feed ostáva dostupný.'));
+    h('p', { class: 'muted' }, 'Meta si v Commerce Manageri (Zdroje dát → Naplánovaný feed) nastaví URL hore. FeedBridge ju každých N minút prepočíta zo zdrojového feedu; ak zdroj zlyhá, posledný dobrý feed ostáva dostupný.'),
+    h('h2', {}, 'História nastavení'),
+    h('div', { class: 'card', id: 'versions-box' }, versionsList()));
+}
+
+async function loadVersions() {
+  if (!state.cur) return;
+  const id = state.cur.id;
+  const list = await api(`/projects/${id}/versions`).catch(() => []);
+  if (state.cur?.id !== id) return;
+  state.versions = list;
+  document.getElementById('versions-box')?.replaceChildren(versionsList());
+}
+
+function versionsList() {
+  const list = state.versions;
+  if (!list) return h('p', { class: 'muted' }, 'Načítavam…');
+  if (list.length < 2) return h('p', { class: 'muted' }, 'Zatiaľ len aktuálna verzia. Každé uloženie, ktoré niečo zmení, sem pridá záznam (posledných 30).');
+  return h('table', {},
+    h('thead', {}, h('tr', {}, ['Uložené (UTC)', 'Pravidiel', 'Profily', ''].map((t) => h('th', {}, t)))),
+    h('tbody', {}, list.map((v, i) => h('tr', {},
+      h('td', {}, v.created_at), h('td', {}, v.rules), h('td', {}, v.profiles.join(', ')),
+      h('td', {}, i === 0 ? h('span', { class: 'tag ok' }, 'aktuálna') : h('button', { class: 'btn small', onclick: async () => {
+        if (state.dirty && !confirm('Máš neuložené zmeny, obnovením sa stratia. Pokračovať?')) return;
+        if (!confirm(`Vrátiť pravidlá a nastavenia na stav z ${v.created_at}? Zoznam profilov a ich URL sa nemení.`)) return;
+        try { state.cur = await api(`/projects/${state.cur.id}/versions/${v.id}/restore`, { method: 'POST' }); state.dirty = false; state.versions = null; render(); loadVersions(); toast('Obnovené'); }
+        catch (e) { toast(e.message, true); }
+      } }, 'Obnoviť'))))));
 }
 
 // --- pravidlá
@@ -250,20 +286,12 @@ function ruleBody(r) {
   }
 }
 
-function tabRules() {
-  const p = state.cur;
-  const rules = p.config.rules;
+/** Editor zoznamu pravidiel; používa ho projekt aj každý profil. */
+function rulesEditor(rules, emptyText) {
   const move = (i, d) => { const j = i + d; if (j < 0 || j >= rules.length) return; [rules[i], rules[j]] = [rules[j], rules[i]]; markDirty(); render(); };
+  const typeSelect = h('select', { style: 'width:auto' }, Object.entries(RULE_TYPES).map(([v, t]) => h('option', { value: v }, t)));
   return h('div', {},
-    h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))),
-    h('details', { class: 'card' },
-      h('summary', {}, 'Nápoveda: šablóny, filtre a polia'),
-      h('p', {}, 'Šablóna dosadí polia v zložených zátvorkách: ', h('code', {}, '{brand} – {title}'), '. Filtre za zvislou čiarou: ',
-        h('code', {}, 'upper lower title trim strip_html first_word last_category first_category truncate:120 default:Značka'), '.'),
-      h('p', {}, 'Dopočítané polia pre podmienky: ', h('code', {}, 'price_num sale_price_num discount_pct currency'),
-        '. Príklad labelu: pole ', h('code', {}, 'custom_label_0'), ' = ', h('code', {}, 'zlava'), ' keď ', h('code', {}, 'discount_pct'), ' > 0.'),
-      h('p', {}, 'Pravidlá bežia zhora nadol; po pravidle „Vylúčiť“ sa položka už nespracúva.')),
-    rules.length ? null : h('p', { class: 'muted' }, 'Zatiaľ žiadne pravidlá - feed sa preposiela bez zmien.'),
+    rules.length ? null : h('p', { class: 'muted' }, emptyText),
     rules.map((r, i) => h('div', { class: 'card rule' + (r.enabled === false ? ' off' : '') },
       h('div', { class: 'rule-head' },
         h('span', { class: 'muted' }, `${i + 1}.`),
@@ -275,13 +303,79 @@ function tabRules() {
         h('button', { class: 'btn small', onclick: () => move(i, 1) }, '↓'),
         h('button', { class: 'btn small danger', onclick: () => { rules.splice(i, 1); markDirty(); render(); } }, 'Zmazať')),
       ruleBody(r), whenEditor(r))),
-    h('div', { class: 'row' },
-      h('select', { id: 'new-rule-type', style: 'width:auto' }, Object.entries(RULE_TYPES).map(([v, t]) => h('option', { value: v }, t))),
+    h('div', { class: 'row' }, typeSelect,
       h('button', { class: 'btn', onclick: () => {
-        const type = document.getElementById('new-rule-type').value;
+        const type = typeSelect.value;
         rules.push({ type, when: [], ...(type === 'price' ? { field: 'price', mode: 'percent', value: '' } : {}) });
         markDirty(); render();
       } }, '+ Pridať pravidlo')));
+}
+
+function tabRules() {
+  const p = state.cur;
+  return h('div', {},
+    h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))),
+    h('details', { class: 'card' },
+      h('summary', {}, 'Nápoveda: šablóny, filtre a polia'),
+      h('p', {}, 'Šablóna dosadí polia v zložených zátvorkách: ', h('code', {}, '{brand} – {title}'), '. Filtre za zvislou čiarou: ',
+        h('code', {}, 'upper lower title trim strip_html first_word last_category first_category truncate:120 default:Značka'), '.'),
+      h('p', {}, 'Dopočítané polia pre podmienky: ', h('code', {}, 'price_num sale_price_num discount_pct currency'),
+        '. Príklad labelu: pole ', h('code', {}, 'custom_label_0'), ' = ', h('code', {}, 'zlava'), ' keď ', h('code', {}, 'discount_pct'), ' > 0.'),
+      h('p', {}, 'Pravidlá bežia zhora nadol; po pravidle „Vylúčiť“ sa položka už nespracúva. Tieto pravidlá platia pre všetky profily, pravidlá len pre jeden kanál sú v záložke Profily.')),
+    rulesEditor(p.config.rules, 'Zatiaľ žiadne pravidlá - feed sa preposiela bez zmien.'));
+}
+
+// --- exportné profily: jeden projekt, viac výstupných feedov
+function slugify(s) {
+  return String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function tabProfiles() {
+  const p = state.cur;
+  const profiles = p.config.profiles;
+  return h('div', {},
+    h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))),
+    h('p', { class: 'muted' }, 'Každý profil je samostatný feed s vlastnou URL. Zdroj a spoločné pravidlá má projekt, profil si pridáva vlastné pravidlá a určuje, aké obrázky dostane kanál. Google dostáva vždy pôvodnú fotku: promo grafiku ako hlavný obrázok nepovoľuje.'),
+    profiles.map((pr, i) => {
+      const isNew = !pr.feed_url; // ešte neuložený: slug sa dá zvoliť, potom je navždy
+      const google = pr.channel === 'google';
+      return h('div', { class: 'card rule' + (pr.enabled === false ? ' off' : '') },
+        h('div', { class: 'rule-head' },
+          h('b', {}, pr.name || `Profil ${i + 1}`), h('span', { class: 'tag' }, CHANNELS[pr.channel]),
+          h('span', { class: 'spacer' }),
+          h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: pr.enabled !== false, onchange: (e) => { pr.enabled = e.target.checked; markDirty(); render(); } }), 'zapnutý'),
+          profiles.length > 1 ? h('button', { class: 'btn small danger', onclick: () => {
+            if (!isNew && !confirm(`Zmazať profil „${pr.name}“? Po uložení zmizne aj jeho feed ${pr.feed_url} a kanál, ktorý ho sťahuje, dostane chybu.`)) return;
+            profiles.splice(i, 1); markDirty(); render();
+          } }, 'Zmazať') : null),
+        h('div', { class: 'grid' },
+          textInput('Názov', pr, 'name', { onchange: () => { if (isNew && !pr.slugTouched) { pr.slug = slugify(`${p.slug}-${pr.name}`); const el = document.getElementById(`slug-${i}`); if (el) el.value = pr.slug; } } }),
+          h('label', { class: 'f' }, isNew ? 'Slug (URL feedu, po uložení sa nemení)' : 'Slug (URL feedu)',
+            h('input', { type: 'text', id: `slug-${i}`, value: pr.slug, readonly: !isNew, oninput: (e) => { pr.slug = e.target.value; pr.slugTouched = true; markDirty(); } })),
+          selectInput('Kanál', pr, 'channel', CHANNELS, () => render()),
+          google
+            ? h('label', { class: 'f' }, 'Obrázky', h('input', { type: 'text', value: 'Pôvodné fotky (Google)', readonly: true }))
+            : selectInput('Obrázky', pr, 'imageMode', { project: 'Podľa záložky Obrázky (nové pozadie)', original: 'Pôvodné fotky z e-shopu' })),
+        h('details', { open: pr.rules.length > 0 },
+          h('summary', {}, `Pravidlá len pre tento profil (${pr.rules.length})`),
+          rulesEditor(pr.rules, 'Žiadne vlastné pravidlá. Platia len pravidlá projektu.')));
+    }),
+    h('div', { class: 'row' },
+      ...Object.entries(CHANNELS).map(([ch, label]) => h('button', { class: 'btn', onclick: () => {
+        let slug = `${p.slug}-${ch}`;
+        for (let n = 2; profiles.some((x) => x.slug === slug); n++) slug = `${p.slug}-${ch}-${n}`;
+        profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'google' ? 'original' : 'project', rules: [] });
+        markDirty(); render();
+      } }, `+ Profil pre ${label}`))));
+}
+
+/** Prepínač profilu pre Náhľad a Výstup. */
+function profilePicker(onchange) {
+  const profiles = state.cur.config.profiles;
+  if (!profiles.some((x) => x.slug === state.viewProfile)) state.viewProfile = profiles[0]?.slug;
+  if (profiles.length < 2) return null;
+  return h('select', { style: 'width:auto', onchange: (e) => { state.viewProfile = e.target.value; onchange(); } },
+    profiles.map((x) => h('option', { value: x.slug, selected: x.slug === state.viewProfile }, `${x.name} (${CHANNELS[x.channel]})`)));
 }
 
 // --- obrázky
@@ -336,8 +430,9 @@ function tabImages() {
       h('div', { class: 'grid' },
         selectInput('Vystrihnutie produktu', s, 'provider', {
           whitekey: 'Lokálne - biele pozadie → priehľadné (zadarmo)',
-          removebg: 'remove.bg API (kvalitné, platené)',
-          rembg: 'Vlastný rembg server',
+          rembg: 'Vlastný rembg server (AI, zadarmo)',
+          magnific: 'Magnific API (AI, platené kreditmi)',
+          removebg: 'remove.bg API (platené)',
           none: 'Bez vystrihnutia (obrázok už je PNG s priehľadnosťou)',
         }),
         selectInput('Spôsob vloženia', s, 'mode', {
@@ -352,6 +447,8 @@ function tabImages() {
         textInput('Kvalita JPEG', s, 'quality', { type: 'number' }),
         checkInput('Jemný tieň pod produktom', s, 'shadow'),
         checkInput('Pôvodný obrázok pridať ako dodatočný', s, 'keepOriginalAsAdditional'))),
+    h('h2', {}, 'Knižnica pozadí'),
+    h('div', { class: 'card' }, assetLibrary()),
     h('h2', {}, 'Predvolené pozadie'),
     h('div', { class: 'card' }, backgroundEditor(s.background)),
     h('h2', {}, 'Pozadia podľa podmienok'),
@@ -371,6 +468,32 @@ function tabImages() {
     h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))));
 }
 
+function assetLibrary() {
+  const gen = { name: '', prompt: '' };
+  const status = h('span', { class: 'muted' });
+  const refresh = async () => { state.assets = await api('/assets'); render(); };
+  return h('div', {},
+    state.assets.length ? h('div', { class: 'assets' }, state.assets.map((a) => h('div', { class: 'asset' },
+      h('img', { src: a.url, loading: 'lazy', alt: '' }),
+      h('div', { class: 'row' }, h('span', {}, a.name), h('span', { class: 'spacer' }),
+        h('button', { class: 'btn small danger', onclick: async () => {
+          if (!confirm(`Zmazať „${a.name}“ z knižnice? Projekty, ktoré ho používajú, začnú pri obrázkoch hlásiť chybu.`)) return;
+          try { await api('/assets/' + a.name, { method: 'DELETE' }); await refresh(); } catch (e) { toast(e.message, true); }
+        } }, '×')))))
+      : h('p', { class: 'muted' }, 'Knižnica je prázdna. Nahraj obrázok pri výbere pozadia nižšie alebo si ho nechaj vygenerovať.'),
+    h('div', { class: 'grid', style: 'margin-top:12px' },
+      textInput('Názov nového pozadia', gen, 'name', { placeholder: 'napr. jar-pastel' }),
+      textInput('Popis pre AI (najlepšie po anglicky)', gen, 'prompt', { placeholder: 'Empty product backdrop, pastel studio, soft daylight, no text' })),
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'btn', onclick: async (e) => {
+        e.target.disabled = true; status.textContent = 'Generujem, trvá to do minúty…';
+        try {
+          await api('/assets/generate', { method: 'POST', body: { name: slugify(gen.name), prompt: gen.prompt } });
+          toast('Pozadie pridané do knižnice'); await refresh();
+        } catch (err) { toast(err.message, true); status.textContent = ''; e.target.disabled = false; }
+      } }, 'Vygenerovať cez Magnific'), status));
+}
+
 // --- náhľad pravidiel
 function tabPreview() {
   const p = state.cur;
@@ -379,7 +502,7 @@ function tabPreview() {
     const d = state.preview;
     if (!d) { box.replaceChildren(h('p', { class: 'muted' }, 'Stiahne zdrojový feed a ukáže, ako by vyzeral po pravidlách (bez obrázkov, aj s neuloženými zmenami).')); return; }
     box.replaceChildren(
-      h('p', {}, `Položiek: ${d.total} · vylúčených: ${d.excluded} · s chybami pre Metu: `, h('b', { style: d.invalid ? 'color:var(--err)' : '' }, String(d.invalid)), ` · zobrazených: ${d.rows.length}`),
+      h('p', {}, `Položiek: ${d.total} · vylúčených: ${d.excluded} · s chybami pre ${CHANNELS[d.channel] || 'kanál'}: `, h('b', { style: d.invalid ? 'color:var(--err)' : '' }, String(d.invalid)), ` · zobrazených: ${d.rows.length}`),
       h('table', {},
         h('thead', {}, h('tr', {}, ['ID', 'Titulok', 'Cena', 'Labely / zmenené polia', 'Problémy'].map((t) => h('th', {}, t)))),
         h('tbody', {}, d.rows.map((r) => {
@@ -395,13 +518,15 @@ function tabPreview() {
         }))));
   };
   draw();
+  const picker = profilePicker(() => { state.preview = null; draw(); });
   return h('div', {},
-    h('button', { class: 'btn primary', onclick: async (e) => {
-      e.target.disabled = true; e.target.textContent = 'Načítavam…';
-      try { state.preview = await api(`/projects/${p.id}/preview`, { method: 'POST', body: { config: p.config, source_url: p.source_url, limit: 80 } }); }
-      catch (err) { toast(err.message, true); }
-      e.target.disabled = false; e.target.textContent = 'Načítať náhľad'; draw();
-    } }, 'Načítať náhľad'),
+    h('div', { class: 'row' }, picker,
+      h('button', { class: 'btn primary', onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = 'Načítavam…';
+        try { state.preview = await api(`/projects/${p.id}/preview`, { method: 'POST', body: { config: p.config, source_url: p.source_url, limit: 80, profile: state.viewProfile } }); }
+        catch (err) { toast(err.message, true); }
+        e.target.disabled = false; e.target.textContent = 'Načítať náhľad'; draw();
+      } }, 'Načítať náhľad')),
     h('div', { style: 'margin-top:14px' }, box));
 }
 
@@ -409,25 +534,29 @@ function tabPreview() {
 async function loadOutput() {
   if (!state.cur) return;
   const id = state.cur.id;
-  const data = await api(`/projects/${id}/output`).catch((e) => ({ error: e.message, items: [] }));
-  if (state.cur?.id !== id) return;
+  const want = state.viewProfile;
+  const q = want ? `?profile=${encodeURIComponent(want)}` : '';
+  const data = await api(`/projects/${id}/output${q}`).catch((e) => ({ error: e.message, items: [] }));
+  if (state.cur?.id !== id || state.viewProfile !== want) return; // medzitým prepnutý projekt alebo profil
   state.output = data;
   if (state.tab === 'output') document.getElementById('tab-body')?.replaceChildren(tabOutput());
 }
 
 function tabOutput() {
   const d = state.output;
-  if (!d) return h('p', { class: 'muted' }, 'Načítavam…');
-  if (d.error) return h('p', { style: 'color:var(--err)' }, d.error);
-  if (!d.items.length) return h('p', { class: 'muted' }, 'Feed ešte nebol vygenerovaný. Klikni na „Spustiť teraz“.');
-  return h('div', {},
-    h('p', { class: 'muted' }, `Zverejnený feed: ${d.items.length} položiek, vygenerovaný ${new Date(d.generated_at).toLocaleString('sk-SK')}. Toto si sťahuje Meta.`),
+  const picker = profilePicker(() => { state.output = null; document.getElementById('tab-body')?.replaceChildren(tabOutput()); loadOutput(); });
+  const head = picker ? h('div', { class: 'row', style: 'margin-bottom:10px' }, picker) : null;
+  if (!d) return h('div', {}, head, h('p', { class: 'muted' }, 'Načítavam…'));
+  if (d.error) return h('div', {}, head, h('p', { style: 'color:var(--err)' }, d.error));
+  if (!d.items.length) return h('div', {}, head, h('p', { class: 'muted' }, 'Feed tohto profilu ešte nebol vygenerovaný. Klikni na „Spustiť teraz“.'));
+  return h('div', {}, head,
+    h('p', { class: 'muted' }, `Zverejnený feed: ${d.items.length} položiek, vygenerovaný ${new Date(d.generated_at).toLocaleString('sk-SK')}. Toto si sťahuje kanál.`),
     h('div', { class: 'gallery' }, d.items.map((it) => h('div', { class: 'gcard' },
       h('a', { href: it.image_link, target: '_blank', rel: 'noopener' }, h('img', { src: it.image_link, loading: 'lazy', alt: '' })),
       h('div', { class: 'gbody' },
         h('div', { class: 'gtitle' }, it.title),
         h('div', {}, it.sale_price ? [h('span', { class: 'old' }, it.price), it.sale_price] : it.price,
-          it.availability !== 'in stock' ? h('span', { class: 'tag warning', style: 'margin-left:6px' }, it.availability) : null),
+          !['in stock', 'in_stock'].includes(it.availability) ? h('span', { class: 'tag warning', style: 'margin-left:6px' }, it.availability) : null),
         h('div', {}, h('span', { class: 'tag' }, it.id), Object.entries(it.labels).map(([k, v]) => h('span', { class: 'tag ok' }, `${k.replace('custom_label_', 'L')}: ${v}`))))))));
 }
 
@@ -447,12 +576,15 @@ function tabRuns() {
   };
   return h('div', {},
     state.runs.length ? h('table', {},
-      h('thead', {}, h('tr', {}, ['Začiatok (UTC)', 'Stav', 'Vstup', 'Vylúčené', 'Zapísané', 'Obrázky nové/cache/chyby', ''].map((t) => h('th', {}, t)))),
+      h('thead', {}, h('tr', {}, ['Začiatok (UTC)', 'Stav', 'Vstup', 'Profily: zapísané / vylúčené', 'Obrázky nové/cache/chyby', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, state.runs.map((r) => {
         const s = r.summary || {};
+        const per = s.profiles ? Object.entries(s.profiles).map(([slug, x]) => h('div', {},
+          h('span', { class: 'tag' + (x.error ? ' err' : '') }, slug), x.error ? x.error : `${x.written} / ${x.excluded}`, x.invalid ? h('span', { class: 'tag err' }, `${x.invalid} chybných`) : null))
+          : (s.error ?? `${s.written ?? ''} / ${s.excluded ?? ''}`); // staršie behy a zlyhanie zdroja
         return h('tr', {},
           h('td', {}, r.started_at), h('td', {}, h('span', { class: 'tag ' + r.status }, r.status)),
-          h('td', {}, s.total ?? ''), h('td', {}, s.excluded ?? ''), h('td', {}, s.written ?? s.error ?? ''),
+          h('td', {}, s.total ?? ''), h('td', {}, per),
           h('td', {}, s.images ? `${s.images.generated}/${s.images.cached}/${s.images.failed}` : ''),
           h('td', {}, h('button', { class: 'btn small', onclick: () => show(r.id) }, 'Log')));
       }))) : h('p', { class: 'muted' }, 'Zatiaľ žiadne behy. Klikni na „Spustiť teraz“.'),

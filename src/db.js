@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
 import { config, defaultProjectConfig } from './config.js';
 
 const db = new DatabaseSync(config.dbFile);
@@ -27,6 +28,13 @@ CREATE TABLE IF NOT EXISTS runs (
   log TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, id DESC);
+CREATE TABLE IF NOT EXISTS config_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  config TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_versions_project ON config_versions(project_id, id DESC);
 `);
 
 /**
@@ -52,15 +60,37 @@ function rowToProject(r) {
   return {
     ...r,
     enabled: !!r.enabled,
-    config: normalizeConfig(JSON.parse(r.config)), // doplní kľúče pridané v novších verziách (safety…)
+    config: normalizeConfig(JSON.parse(r.config), r.slug), // doplní kľúče pridané v novších verziách (safety, profiles…)
     last_summary: r.last_summary ? JSON.parse(r.last_summary) : null,
   };
 }
 
-export function normalizeConfig(cfg) {
+/**
+ * Exportné profily: každý je jeden výstupný feed s vlastnou URL (/feeds/<slug>.xml).
+ * Projekt bez profilov (staršie verzie) dostane predvolený so slugom projektu, takže
+ * pôvodná URL feedu ostáva v platnosti.
+ */
+export function normalizeProfiles(list, projectSlug) {
+  const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => ({
+    id: typeof p.id === 'string' && /^[a-z0-9]{1,16}$/.test(p.id) ? p.id : crypto.randomBytes(4).toString('hex'),
+    slug: p.slug,
+    name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
+    channel: p.channel === 'google' ? 'google' : 'meta',
+    enabled: p.enabled !== false,
+    imageMode: p.imageMode === 'original' ? 'original' : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
+    rules: Array.isArray(p.rules) ? p.rules : [],
+  }));
+  if (!out.length && projectSlug) {
+    out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', rules: [] });
+  }
+  return out;
+}
+
+export function normalizeConfig(cfg, projectSlug) {
   const base = defaultProjectConfig();
   const c = cfg || {};
   return {
+    profiles: normalizeProfiles(c.profiles, projectSlug),
     rules: Array.isArray(c.rules) ? c.rules : base.rules,
     images: {
       ...base.images,
@@ -89,13 +119,17 @@ export const projects = {
   create({ name, slug, source_url = '', interval_minutes = 180, enabled = true, config: cfg }) {
     const res = db
       .prepare('INSERT INTO projects (name, slug, source_url, interval_minutes, enabled, config) VALUES (?,?,?,?,?,?)')
-      .run(name, slug, source_url, interval_minutes, enabled ? 1 : 0, JSON.stringify(normalizeConfig(cfg)));
-    return this.get(Number(res.lastInsertRowid));
+      .run(name, slug, source_url, interval_minutes, enabled ? 1 : 0, JSON.stringify(normalizeConfig(cfg, slug)));
+    const id = Number(res.lastInsertRowid);
+    versions.record(id);
+    return this.get(id);
   },
   update(id, { name, slug, source_url, interval_minutes, enabled, config: cfg }) {
+    versions.record(id); // projekt z čias pred históriou: odlož aj stav pred prvou úpravou
     db.prepare(
       'UPDATE projects SET name=?, slug=?, source_url=?, interval_minutes=?, enabled=?, config=? WHERE id=?'
-    ).run(name, slug, source_url, interval_minutes, enabled ? 1 : 0, JSON.stringify(normalizeConfig(cfg)), id);
+    ).run(name, slug, source_url, interval_minutes, enabled ? 1 : 0, JSON.stringify(normalizeConfig(cfg, slug)), id);
+    versions.record(id);
     return this.get(id);
   },
   remove(id) {
@@ -107,6 +141,30 @@ export const projects = {
       JSON.stringify(summary),
       id
     );
+  },
+};
+
+/** História konfigurácie: po každom uložení, ktoré niečo zmenilo, sa odloží kópia (posledných 30). */
+export const versions = {
+  record(projectId) {
+    const cur = db.prepare('SELECT config FROM projects WHERE id = ?').get(projectId);
+    if (!cur) return;
+    const last = db.prepare('SELECT config FROM config_versions WHERE project_id = ? ORDER BY id DESC LIMIT 1').get(projectId);
+    if (last && last.config === cur.config) return;
+    db.prepare('INSERT INTO config_versions (project_id, config) VALUES (?, ?)').run(projectId, cur.config);
+    db.prepare(
+      'DELETE FROM config_versions WHERE project_id = ? AND id NOT IN (SELECT id FROM config_versions WHERE project_id = ? ORDER BY id DESC LIMIT 30)'
+    ).run(projectId, projectId);
+  },
+  list(projectId) {
+    return db.prepare('SELECT id, created_at, config FROM config_versions WHERE project_id = ? ORDER BY id DESC').all(projectId).map((v) => {
+      const c = JSON.parse(v.config);
+      return { id: v.id, created_at: v.created_at, rules: (c.rules || []).length, profiles: (c.profiles || []).map((p) => p.slug) };
+    });
+  },
+  get(projectId, id) {
+    const v = db.prepare('SELECT config FROM config_versions WHERE project_id = ? AND id = ?').get(projectId, id);
+    return v ? JSON.parse(v.config) : null;
   },
 };
 

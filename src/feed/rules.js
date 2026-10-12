@@ -175,7 +175,7 @@ function setScalar(item, field, value) {
  * Aplikuje pravidlá na jednu položku.
  * Vráti { item, excluded: null | {rule, index}, changes: [polia, ktoré sa zmenili] }
  */
-export function applyRules(original, rules) {
+export function applyRules(original, rules, channel = 'meta') {
   const item = structuredClone(original);
   const changed = new Set();
   for (let i = 0; i < (rules || []).length; i++) {
@@ -238,59 +238,99 @@ export function applyRules(original, rules) {
       default: break;
     }
   }
-  for (const f of normalizeForMeta(item)) changed.add(f);
+  for (const f of normalizeForChannel(item, channel)) changed.add(f);
   return { item, excluded: null, changed: [...changed] };
 }
+
+// ---------------------------------------------------------------- kanály (Meta, Google)
 
 // Google formát (in_stock, backorder…) -> hodnoty, ktoré uvádza Meta špecifikácia
 const AVAILABILITY_MAP = {
   in_stock: 'in stock', out_of_stock: 'out of stock', preorder: 'preorder',
   backorder: 'available for order', available_for_order: 'available for order',
 };
+const TO_GOOGLE = {
+  'in stock': 'in_stock', 'out of stock': 'out_of_stock', preorder: 'preorder',
+  'available for order': 'backorder', discontinued: 'out_of_stock',
+};
+// polia, ktoré pozná len Meta; v Google feede by boli hlásené ako neznáme atribúty
+const META_ONLY = ['quantity_to_sell_on_facebook', 'status', 'visibility', 'fb_product_category', 'internal_label', 'additional_variant_attribute'];
+
+export const CHANNELS = {
+  meta: {
+    label: 'Meta',
+    required: ['id', 'title', 'description', 'link', 'image_link', 'price', 'availability', 'condition'],
+    titleMax: 200, descriptionMax: 9999, additionalImages: 20,
+    availability: ['in stock', 'out of stock', 'preorder', 'available for order', 'discontinued'],
+  },
+  google: {
+    label: 'Google',
+    required: ['id', 'title', 'description', 'link', 'image_link', 'price', 'availability'],
+    titleMax: 150, descriptionMax: 5000, additionalImages: 10,
+    availability: ['in_stock', 'out_of_stock', 'preorder', 'backorder'],
+  },
+};
+export const channelOf = (name) => (name === 'google' ? 'google' : 'meta');
 
 function metaAvailability(v) {
   return AVAILABILITY_MAP[String(v).trim().toLowerCase().replace(/\s+/g, '_')] ?? v;
 }
 
-/** Zjednotí hodnoty polí na formát Mety. Vráti zoznam zmenených polí. */
-export function normalizeForMeta(item) {
+/** Zjednotí hodnoty polí na formát kanála. Vráti zoznam zmenených polí. */
+export function normalizeForChannel(item, channel = 'meta') {
+  const ch = channelOf(channel);
   const changed = [];
   const av = fieldValue(item, 'availability').trim().toLowerCase();
-  const mapped = AVAILABILITY_MAP[av.replace(/\s+/g, '_')];
-  if (mapped && mapped !== item.availability) { item.availability = mapped; changed.push('availability'); }
+  if (av) {
+    const meta = metaAvailability(av);
+    const target = ch === 'google' ? TO_GOOGLE[meta] : AVAILABILITY_MAP[av.replace(/\s+/g, '_')];
+    if (target && target !== item.availability) { item.availability = target; changed.push('availability'); }
+  }
   const cond = fieldValue(item, 'condition').trim();
   if (cond && cond !== cond.toLowerCase()) { item.condition = cond.toLowerCase(); changed.push('condition'); }
+  if (ch === 'google') {
+    for (const f of META_ONLY) if (f in item) { delete item[f]; changed.push(f); }
+  }
+  const max = CHANNELS[ch].additionalImages;
+  if (Array.isArray(item.additional_image_link) && item.additional_image_link.length > max) {
+    item.additional_image_link = item.additional_image_link.slice(0, max);
+    changed.push('additional_image_link');
+  }
   return changed;
 }
 
-export const REQUIRED_FIELDS = ['id', 'title', 'description', 'link', 'image_link', 'price', 'availability', 'condition'];
-const AVAILABILITY = ['in stock', 'out of stock', 'preorder', 'available for order', 'discontinued'];
 const CONDITIONS = ['new', 'refurbished', 'used', 'used_like_new', 'used_good', 'used_fair', 'cpo', 'open_box_new'];
 
 /**
- * Meta katalóg: errors = položka bude odmietnutá (počíta sa do "invalid"),
- * warnings = odporúčané polia (brand/gtin/mpn), položka prejde.
+ * Kontrola položky pre daný kanál: errors = položka bude odmietnutá (počíta sa do "invalid"),
+ * warnings = odporúčané polia, položka prejde.
  */
-export function checkItem(item) {
+export function checkItem(item, channel = 'meta') {
+  const ch = channelOf(channel);
+  const spec = CHANNELS[ch];
   const errors = [];
   const warnings = [];
-  for (const f of REQUIRED_FIELDS) {
+  for (const f of spec.required) {
     if (fieldValue(item, f).trim() === '') errors.push(`chýba ${f}`);
   }
   const t = fieldValue(item, 'title');
-  if (t.length > 200) errors.push('title > 200 znakov');
+  if (t.length > spec.titleMax) errors.push(`title > ${spec.titleMax} znakov`);
   const d = fieldValue(item, 'description');
-  if (d.length > 9999) errors.push('description > 9999 znakov');
+  if (d.length > spec.descriptionMax) errors.push(`description > ${spec.descriptionMax} znakov`);
   const p = parsePrice(fieldValue(item, 'price'));
   if (fieldValue(item, 'price') && !p) errors.push('price v neplatnom formáte');
+  if (p && !p.currency) errors.push('price bez meny');
   const av = fieldValue(item, 'availability');
-  if (av && !AVAILABILITY.includes(av.toLowerCase())) errors.push(`availability "${av}" nie je platná hodnota`);
+  if (av && !spec.availability.includes(av.toLowerCase())) errors.push(`availability "${av}" nie je platná hodnota`);
   const cond = fieldValue(item, 'condition');
   if (cond && !CONDITIONS.includes(cond.toLowerCase())) errors.push(`condition "${cond}" nie je platná hodnota`);
   if (!['brand', 'gtin', 'mpn'].some((f) => fieldValue(item, f).trim() !== '')) warnings.push('chýba brand (ani gtin/mpn)');
+  if (ch === 'google' && ['preorder', 'backorder'].includes(av.toLowerCase()) && !fieldValue(item, 'availability_date').trim()) {
+    errors.push('chýba availability_date (Google ho pri predobjednávke a tovare na objednávku vyžaduje)');
+  }
   return { errors, warnings };
 }
 
-export function validateItem(item) {
-  return checkItem(item).errors;
+export function validateItem(item, channel = 'meta') {
+  return checkItem(item, channel).errors;
 }

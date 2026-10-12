@@ -147,6 +147,99 @@ await t('výstup projektu pre galériu zodpovedá zverejnenému feedu', async ()
   assert.ok(out.generated_at);
 });
 
+await t('profily: pridanie Google profilu, vlastný feed, zamknutý slug, jedinečnosť, zmazanie zmaže feed', async () => {
+  let cur = await (await api('/projects/' + proj.id)).json();
+  assert.deepEqual(cur.config.profiles.map((p) => p.slug), ['demo']);
+  assert.match(cur.config.profiles[0].feed_url, /\/feeds\/demo\.xml$/);
+  cur.config.profiles.push({ slug: 'demo-google', name: 'Google', channel: 'google', rules: [] });
+  let r = await api('/projects/' + proj.id, { method: 'PUT', body: cur });
+  assert.equal(r.status, 200);
+  cur = await r.json();
+  const g = cur.config.profiles[1];
+  assert.ok(g.id && g.slug === 'demo-google' && g.has_feed === false);
+  // iný projekt nemôže dostať rovnaký slug ani ako projekt, ani ako profil
+  assert.equal((await api('/projects', { method: 'POST', body: { name: 'X', slug: 'demo-google' } })).status, 409);
+  // slug uloženého profilu sa nedá zmeniť
+  const renamed = structuredClone(cur); renamed.config.profiles[1].slug = 'demo-ine';
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: renamed })).status, 409);
+  // dvakrát ten istý slug v projekte
+  const dup = structuredClone(cur); dup.config.profiles.push({ slug: 'demo-google', name: 'Znova', channel: 'meta' });
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: dup })).status, 409);
+  // projekt bez profilov
+  const none = structuredClone(cur); none.config.profiles = [];
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: none })).status, 400);
+
+  await api(`/projects/${proj.id}/run`, { method: 'POST' });
+  let p;
+  for (let i = 0; i < 60; i++) { p = await (await api('/projects/' + proj.id)).json(); if (!p.running && p.last_summary?.profiles?.['demo-google']) break; await new Promise((x) => setTimeout(x, 100)); }
+  assert.equal(p.last_status, 'ok', JSON.stringify(p.last_summary));
+  const gx = await (await fetch(base + '/feeds/demo-google.xml')).text();
+  assert.match(gx, /<g:availability>in_stock<\/g:availability>/);
+  assert.match(gx, new RegExp('<g:image_link>' + srcUrl.replace('/feed.xml', '/p.jpg').replace(/[.]/g, '\\.')));
+  assert.equal((await (await api(`/projects/${proj.id}/output?profile=demo-google`)).json()).items.length, 1);
+  const pv = await (await api(`/projects/${proj.id}/preview`, { method: 'POST', body: { profile: 'demo-google' } })).json();
+  assert.equal(pv.channel, 'google');
+  assert.equal(pv.rows[0].result.availability, 'in_stock');
+
+  // zmazanie profilu zmaže aj jeho feed
+  p.config.profiles = p.config.profiles.filter((x) => x.slug !== 'demo-google');
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: p })).status, 200);
+  assert.equal((await fetch(base + '/feeds/demo-google.xml')).status, 404);
+  assert.equal((await fetch(base + '/feeds/demo.xml')).status, 200);
+  proj = await (await api('/projects/' + proj.id)).json();
+});
+
+await t('duplikát projektu s dlhým slugom a dvoma profilmi si profily udrží', async () => {
+  const long = 'a' + 'b'.repeat(52); // 53 znakov
+  const made = await (await api('/projects', { method: 'POST', body: { name: 'Dlhý', slug: long } })).json();
+  made.config.profiles.push({ slug: `${long}-g`, name: 'Google', channel: 'google' });
+  assert.equal((await api('/projects/' + made.id, { method: 'PUT', body: made })).status, 200);
+  const dup = await (await api(`/projects/${made.id}/duplicate`, { method: 'POST' })).json();
+  assert.equal(dup.config.profiles.length, 2);
+  assert.ok(dup.config.profiles.every((p) => p.slug.length <= 60), JSON.stringify(dup.config.profiles.map((p) => p.slug)));
+  assert.equal(new Set([...dup.config.profiles, ...made.config.profiles].map((p) => p.slug)).size, 4);
+  await api('/projects/' + dup.id, { method: 'DELETE' });
+  await api('/projects/' + made.id, { method: 'DELETE' });
+});
+
+await t('história nastavení: uloženie pridá verziu, obnovenie vráti pravidlá a nechá profily', async () => {
+  const before = await (await api(`/projects/${proj.id}/versions`)).json();
+  assert.ok(before.length >= 2);
+  const rulesNow = proj.config.rules.length;
+  const edited = structuredClone(proj); edited.config.rules.push({ type: 'remove', field: 'brand' });
+  await api('/projects/' + proj.id, { method: 'PUT', body: edited });
+  const after = await (await api(`/projects/${proj.id}/versions`)).json();
+  assert.equal(after.length, before.length + 1);
+  assert.equal(after[0].rules, rulesNow + 1);
+  // uloženie bez zmeny verziu nepridá
+  await api('/projects/' + proj.id, { method: 'PUT', body: edited });
+  assert.equal((await (await api(`/projects/${proj.id}/versions`)).json()).length, after.length);
+  const r = await api(`/projects/${proj.id}/versions/${after[1].id}/restore`, { method: 'POST' });
+  assert.equal(r.status, 200);
+  proj = await r.json();
+  assert.equal(proj.config.rules.length, rulesNow);
+  assert.deepEqual(proj.config.profiles.map((p) => p.slug), ['demo']);
+  assert.equal((await api(`/projects/${proj.id}/versions/999999/restore`, { method: 'POST' })).status, 404);
+});
+
+await t('verejný /src vráti originál ako JPEG len pre známy odtlačok', async () => {
+  const dir = path.join(tmp, 'cache', 'orig');
+  const blob = fs.readdirSync(dir).find((n) => n.startsWith('c-'));
+  const ok = await fetch(`${base}/src/${blob.slice(2)}.jpg`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get('content-type'), 'image/jpeg');
+  assert.equal((await fetch(`${base}/src/${'0'.repeat(40)}.jpg`)).status, 404);
+  assert.equal((await fetch(`${base}/src/..%2F..%2Ffeedbridge.db`)).status, 404);
+});
+
+await t('generovanie pozadia bez kľúča alebo so zlým vstupom skončí zrozumiteľnou chybou', async () => {
+  assert.equal((await api('/assets/generate', { method: 'POST', body: { name: 'x', prompt: 'krátke' } })).status, 400);
+  assert.equal((await api('/assets/generate', { method: 'POST', body: { name: 'Zlý Názov', prompt: 'empty studio backdrop, soft light' } })).status, 400);
+  const r = await api('/assets/generate', { method: 'POST', body: { name: 'studio', prompt: 'empty studio backdrop, soft light' } });
+  assert.equal(r.status, 502);
+  assert.match((await r.json()).error, /MAGNIFIC_API_KEY/);
+});
+
 await t('slug sa po vytvorení nedá zmeniť', async () => {
   const r = await api('/projects/' + proj.id, { method: 'PUT', body: { ...proj, slug: 'iny-slug' } });
   assert.equal(r.status, 409);

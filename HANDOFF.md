@@ -8,6 +8,8 @@ Stav k 2026-10-12. Interný nástroj: kontrola nad tým, čo ide z e-shopov do M
 - Poistka poklesu (unikátne ID), zamknutý slug, normalizácia `availability`, obnova zaseknutých behov.
 - Obrázky: výrez (whitekey / remove.bg / rembg), režimy výrez / celá fotka / auto, knižnica pozadí, cache podľa obsahu s overovaním zdroja, retencia starých súborov.
 - Bezpečné sťahovanie (`src/net.js`), upozornenia na webhook, galéria výstupu v UI.
+- Exportné profily (Meta, Google) s vlastnými pravidlami a URL, história nastavení s obnovením.
+- Magnific API: AI výrez a generovanie pozadí do knižnice; rembg kontajner v `deploy/compose.yml`.
 - `deploy/compose.yml` pre zdieľaný Traefik, CI s buildom imageu na GHCR.
 - Testy: `npm test` (pipeline, obrázky, sieť, HTTP vrstva), bez internetu a kľúčov.
 
@@ -28,15 +30,13 @@ Premenné projektu: `FEEDBRIDGE_IMAGE`, `FEEDBRIDGE_HOST`, `ADMIN_PASSWORD`, vol
 ## Známe limity
 
 - Vstup len RSS 2.0 (žiadny Atom/CSV).
-- Jeden výstup na projekt; profily pre viac kanálov (Meta promo, Google čistý) ešte nie sú.
-- Lokálny výrez funguje len na čisto bielom pozadí. Jemne béžové štúdiové fotky skončia v režime auto ako „karta“.
+- Lokálny výrez (whitekey) funguje len na čisto bielom pozadí; na štúdiové fotky s farebným pozadím treba provider rembg alebo magnific.
+- Google profil berie dáta z toho istého zdroja ako Meta; polia, ktoré zdroj nemá (napr. `availability_date`), treba doplniť pravidlom alebo v zdroji.
 - Jedno heslo pre celý admin.
 - Filter `title` v šablónach mení veľkosť písmen naivne („iPhone“ → „Iphone“).
 - Nekontroluje sa, či je `sale_price` nižšia ako `price`.
 
 ## Ďalšie kroky
 
-1. Exportné profily: viac výstupov z jedného projektu, oddelenie čistých a promo obrázkov, Google výstup.
-2. Šablóny s vrstvami: odznak, cena, logo, rámik, podmienky na vrstvách; režim cez pôvodnú fotku aj cez výrez.
-3. Kampane s dátumom od–do (Black Friday, Vianoce) a automatickým návratom.
-4. Lepší výrez: rembg kontajner alebo výrez podľa farby okraja.
+1. Šablóny s vrstvami: odznak, cena, logo, rámik, podmienky na vrstvách; režim cez pôvodnú fotku aj cez výrez.
+2. Kampane s dátumom od–do (Black Friday, Vianoce) a automatickým návratom.

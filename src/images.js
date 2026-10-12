@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import { config } from './config.js';
 import { testWhen } from './feed/rules.js';
 import { safeFetch } from './net.js';
+import { removeBackground as magnificRemoveBackground } from './magnific.js';
 
 const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
 const DAY = 86_400_000;
@@ -205,6 +206,7 @@ async function getCutout(orig, s) {
     const src = await fs.readFile(orig.file);
     let buf;
     if (provider === 'removebg') buf = await cutoutRemoveBg(src);
+    else if (provider === 'magnific') buf = await magnificRemoveBackground(`${config.publicUrl}/src/${orig.hash}.jpg`); // API si fotku sťahuje samo, WebP nevie
     else if (provider === 'rembg') buf = await cutoutRembg(src);
     else if (provider === 'none') buf = await untrusted(src).rotate().png().toBuffer();
     else buf = await cutoutWhiteKey(src, Number(s.whiteThreshold) || 238);
@@ -213,9 +215,32 @@ async function getCutout(orig, s) {
   });
 }
 
+const AI_PROVIDERS = ['removebg', 'rembg', 'magnific'];
+const BORDER_TOLERANCE = 10; // o koľko sa smie pixel okraja líšiť od mediánu, aby sa rátal ako pozadie
+
 /**
- * auto: produktová fotka na bielom (alebo už priehľadnom) pozadí sa vystrihne,
- * lifestyle fotka sa nechá celá a položí sa na pozadie ako karta.
+ * Originál z cache ako JPEG na verejnej adrese /src/<hash>.jpg. Potrebuje ho provider,
+ * ktorý si fotku sťahuje sám a nevie WebP. Vráti null, ak taký originál v cache nie je.
+ */
+export async function originalJpeg(hash) {
+  if (!/^[0-9a-f]{40}$/.test(hash)) return null;
+  const file = path.join(config.cacheDir, 'orig', 'c-' + hash);
+  if (!(await exists(file))) return null;
+  // prevod sa robí raz a ukladá: adresa je verejná, opakované volania nesmú zaťažovať procesor
+  const converted = path.join(config.cacheDir, 'orig', 'j-' + hash + '.jpg');
+  if (await exists(converted)) return fs.readFile(converted);
+  return once(converted, async () => {
+    const jpg = await untrusted(await fs.readFile(file)).rotate().flatten({ background: '#ffffff' })
+      .resize(4096, 4096, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 92 }).toBuffer();
+    await writeAtomic(converted, jpg);
+    return jpg;
+  });
+}
+
+/**
+ * auto: produktová fotka na čistom pozadí sa vystrihne, lifestyle fotka sa nechá celá
+ * a položí sa na pozadie ako karta. Lokálny výrez (whitekey) vie len takmer bielu,
+ * AI výrez zvládne akékoľvek jednofarebné štúdiové pozadie (béžové, sivé…).
  */
 async function resolveMode(orig, s) {
   if (s.mode === 'photo') return 'photo';
@@ -231,16 +256,27 @@ async function resolveMode(orig, s) {
   }
   const px = await untrusted(src).rotate().flatten({ background: '#ffffff' }).resize(n, n, { fit: 'fill' }).removeAlpha().raw().toBuffer();
   const t = Number(s.whiteThreshold) || 238;
-  let white = 0, total = 0;
+  const border = [[], [], []];
+  let white = 0;
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
       if (x > 1 && x < n - 2 && y > 1 && y < n - 2) continue; // len okrajový pás
       const i = (y * n + x) * 3;
-      total++;
       if (px[i] >= t && px[i + 1] >= t && px[i + 2] >= t) white++;
+      for (let c = 0; c < 3; c++) border[c].push(px[i + c]);
     }
   }
-  return white / total >= 0.85 ? 'cutout' : 'photo';
+  const total = border[0].length;
+  if (white / total >= 0.85) return 'cutout';
+  if (!AI_PROVIDERS.includes(s.provider)) return 'photo';
+  // štúdiová fotka: drvivá väčšina okraja má takmer rovnakú farbu ako jeho medián
+  // (namerané na reálnom katalógu: štúdio 0.85-1.00, lifestyle pod 0.55)
+  const median = border.map((ch) => [...ch].sort((p, q) => p - q)[total >> 1]);
+  let close = 0;
+  for (let k = 0; k < total; k++) {
+    if (border.every((ch, c) => Math.abs(ch[k] - median[c]) <= BORDER_TOLERANCE)) close++;
+  }
+  return close / total >= 0.8 ? 'cutout' : 'photo';
 }
 
 // ---------------------------------------------------------------- pozadie
@@ -380,6 +416,8 @@ export async function ensureImage(slug, url, item, s) {
     provider: s.provider,
     mode: s.mode || 'cutout',
     th: s.provider === 'whitekey' || s.mode === 'auto' ? s.whiteThreshold : 0,
+    // len tam, kde sa rozhodovanie auto režimu naozaj zmenilo; inak by sa prerobili všetky staršie obrázky
+    ...(s.mode === 'auto' && AI_PROVIDERS.includes(s.provider) ? { auto: BORDER_TOLERANCE } : {}),
     size: s.size, padding: s.padding, offsetY: s.offsetY, shadow: s.shadow, quality: s.quality,
     bg: bgSpec,
     bgSrc: bgSource?.hash || '',

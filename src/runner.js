@@ -21,7 +21,8 @@ export async function triggerRun(projectId, { force = false } = {}) {
   let result;
   try {
     const summary = await runProject(project, log, { force });
-    const status = summary.images.failed > 0 || summary.invalid > 0 ? 'warning' : 'ok';
+    // summary.error = aspoň jeden profil nezapísal (napr. poistka); ostatné profily zapísané sú
+    const status = summary.error ? 'error' : summary.images.failed > 0 || summary.invalid > 0 ? 'warning' : 'ok';
     result = { runId, status, summary };
   } catch (e) {
     log(`CHYBA: ${e.message}`);

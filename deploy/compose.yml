@@ -7,7 +7,7 @@
 # root_default a smerujeme labelmi. NEPRIDÁVAŤ ďalšiu proxy.
 #
 # Povinné premenné: FEEDBRIDGE_IMAGE, FEEDBRIDGE_HOST, ADMIN_PASSWORD
-# Voliteľné: ADMIN_USER, NOTIFY_WEBHOOK_URL, REMOVEBG_API_KEY, REMBG_URL
+# Voliteľné: ADMIN_USER, NOTIFY_WEBHOOK_URL, MAGNIFIC_API_KEY, REMOVEBG_API_KEY, REMBG_URL
 services:
   feedbridge:
     image: ${FEEDBRIDGE_IMAGE}
@@ -20,12 +20,14 @@ services:
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      MAGNIFIC_API_KEY: ${MAGNIFIC_API_KEY:-}
       REMOVEBG_API_KEY: ${REMOVEBG_API_KEY:-}
-      REMBG_URL: ${REMBG_URL:-}
+      REMBG_URL: ${REMBG_URL:-http://rembg:7000/api/remove}
     volumes:
       - feedbridge_data:/data
     networks:
       - proxy
+      - internal
     labels:
       - traefik.enable=true
       - traefik.docker.network=root_default
@@ -38,10 +40,29 @@ services:
       - traefik.http.routers.feedbridge.tls.certresolver=mytlschallenge
       - traefik.http.routers.feedbridge.service=feedbridge
 
+  # Vlastný výrez pozadia zadarmo (provider "rembg"). Dostupný len z FeedBridge cez
+  # internú sieť, von nie je vystavený. Model sa stiahne pri prvom použití do volume.
+  rembg:
+    image: danielgatis/rembg:latest
+    command: ["s", "--host", "0.0.0.0", "--port", "7000"]
+    restart: always
+    environment:
+      U2NET_HOME: /models
+    volumes:
+      - rembg_models:/models
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
 volumes:
   feedbridge_data:
+  rembg_models:
 
 networks:
   proxy:
     name: root_default
     external: true
+  internal:
