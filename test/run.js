@@ -12,6 +12,7 @@ process.env.DATA_DIR = tmp;
 process.env.PUBLIC_URL = 'https://feeds.example.test';
 process.env.ADMIN_PASSWORD = 'test';
 process.env.ALLOW_PRIVATE_FETCH = '1'; // fixture servery bežia na 127.0.0.1
+process.env.REMBG_RETRY_MS = '50';
 
 const { projects } = await import('../src/db.js');
 const { runProject } = await import('../src/feed/pipeline.js');
@@ -511,6 +512,30 @@ await t('obrázok s obrovskými rozmermi sa odmietne, nespracuje', async () => {
   assert.ok(hugePng.length < 2 * 1024 * 1024, `fixture má ${hugePng.length} B`);
   await assert.rejects(ensureImage('huge', `${base}/huge.png`, {}, { ...imgCfg, mode: 'auto' }), /pixel limit/i);
   hugePng = null;
+});
+
+await t('rembg: požiadavky idú po jednej, posiela sa model a po výpadku sa opakuje', async () => {
+  let active = 0, maxActive = 0, calls = 0, models = new Set();
+  const cut = await sharp({ create: { width: 40, height: 40, channels: 4, background: { r: 200, g: 0, b: 0, alpha: 1 } } }).png().toBuffer();
+  const rembg = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      calls++; active++; maxActive = Math.max(maxActive, active);
+      const m = /name="model"\r\n\r\n([^\r]+)/.exec(Buffer.concat(chunks).toString('latin1')); if (m) models.add(m[1]);
+      if (calls === 1) { active--; return req.socket.destroy(); } // prvý pokus: server "spadol"
+      setTimeout(() => { active--; res.setHeader('Content-Type', 'image/png'); res.end(cut); }, 40);
+    });
+  });
+  await new Promise((r) => rembg.listen(0, '127.0.0.1', r));
+  config.rembgUrl = `http://127.0.0.1:${rembg.address().port}/api/remove`;
+  try {
+    const s = { ...imgCfg, provider: 'rembg', mode: 'cutout', backgrounds: [] };
+    const res = await Promise.all(['a.jpg', 'b.jpg', 'c.jpg'].map((n) => ensureImage('rembg', `${base}/${n}`, {}, s)));
+    assert.equal(res.length, 3);
+    assert.equal(maxActive, 1);
+    assert.equal(calls, 4); // 3 obrázky + 1 opakovanie
+    assert.deepEqual([...models], ['isnet-general-use']);
+  } finally { config.rembgUrl = ''; rembg.close(); }
 });
 
 console.log('Upozornenia');

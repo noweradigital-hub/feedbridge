@@ -181,14 +181,30 @@ async function cutoutRemoveBg(buf) {
   return Buffer.from(await res.arrayBuffer());
 }
 
+// rembg drží model v pamäti a pri viacerých súbežných požiadavkách spadne na limit,
+// preto idú požiadavky po jednej. Po páde sa kontajner sám reštartuje (asi minútu), preto opakovanie.
+let rembgQueue = Promise.resolve();
+const REMBG_RETRY_MS = Number(process.env.REMBG_RETRY_MS || 30000);
+
 async function cutoutRembg(buf) {
   if (!config.rembgUrl) throw new Error('Chýba REMBG_URL (napr. http://rembg:7000/api/remove)');
-  const form = new FormData();
-  form.append('file', new Blob([buf]), 'image.jpg');
-  form.append('model', config.rembgModel);
-  const res = await fetch(config.rembgUrl, { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
-  if (!res.ok) throw new Error(`rembg ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return Buffer.from(await res.arrayBuffer());
+  const job = rembgQueue.then(async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const form = new FormData();
+        form.append('file', new Blob([buf]), 'image.jpg');
+        form.append('model', config.rembgModel);
+        const res = await fetch(config.rembgUrl, { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
+        if (!res.ok) throw Object.assign(new Error(`rembg ${res.status}: ${(await res.text()).slice(0, 200)}`), { final: res.status < 500 });
+        return Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        if (e.final || attempt >= 3) throw e.final ? e : new Error(`rembg nedostupný (${e.cause?.code || e.message})`);
+        await new Promise((r) => setTimeout(r, REMBG_RETRY_MS));
+      }
+    }
+  });
+  rembgQueue = job.catch(() => {});
+  return job;
 }
 
 function cutoutFile(orig, s) {
