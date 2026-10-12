@@ -185,6 +185,7 @@ async function cutoutRembg(buf) {
   if (!config.rembgUrl) throw new Error('Chýba REMBG_URL (napr. http://rembg:7000/api/remove)');
   const form = new FormData();
   form.append('file', new Blob([buf]), 'image.jpg');
+  form.append('model', config.rembgModel);
   const res = await fetch(config.rembgUrl, { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
   if (!res.ok) throw new Error(`rembg ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return Buffer.from(await res.arrayBuffer());

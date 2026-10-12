@@ -18,6 +18,8 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD || '',
   removeBgKey: process.env.REMOVEBG_API_KEY || '',
   rembgUrl: process.env.REMBG_URL || '',
+  // Model treba určiť: predvolený model rembg servera (bria-rmbg, 1 GB) má nekomerčnú licenciu a žerie pamäť
+  rembgModel: process.env.REMBG_MODEL || 'isnet-general-use',
   magnificKey: process.env.MAGNIFIC_API_KEY || '', // provider "magnific" + generovanie pozadí do knižnice
   imageConcurrency: Number(process.env.IMAGE_CONCURRENCY || 3),
   // Meta si obrázky sťahuje až po načítaní feedu, staré URL preto musia ešte chvíľu žiť
