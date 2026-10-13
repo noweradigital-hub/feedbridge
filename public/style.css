@@ -77,3 +77,8 @@ details code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 .asset { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 12px; }
 .asset img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
 .asset .row { padding: 5px 7px; gap: 6px; }
+
+.preview-pair { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+.preview-pair .preview-img { max-width: min(520px, 100%); border-radius: 8px; border: 1px solid var(--line); }
+.preview-thumb { width: 150px; height: 150px; border-radius: 6px; border: 1px solid var(--line); display: block; }
+#img-preview.loading { opacity: 0.55; transition: opacity 0.15s; }

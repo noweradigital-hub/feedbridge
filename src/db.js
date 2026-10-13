@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import { config, defaultProjectConfig } from './config.js';
+import { normalizeBrand } from './badge.js';
 
 const db = new DatabaseSync(config.dbFile);
 db.exec(`
@@ -91,10 +92,16 @@ export function normalizeConfig(cfg, projectSlug) {
   const c = cfg || {};
   return {
     profiles: normalizeProfiles(c.profiles, projectSlug),
+    brand: normalizeBrand(c.brand),
     rules: Array.isArray(c.rules) ? c.rules : base.rules,
     images: {
       ...base.images,
       ...(c.images || {}),
+      // Uložená konfigurácia z čias pred badge nemá `base` ani `badge`, zato má kľúče výmeny pozadia:
+      // vtedy obrázky znamenali výmenu pozadia a tak to aj ostane. Všetko ostatné je pôvodná fotka.
+      base: c.images?.base === 'photo' || c.images?.base === 'background' ? c.images.base
+        : c.images && !('badge' in c.images) && ('provider' in c.images || 'background' in c.images) ? 'background' : 'photo',
+      badge: { ...base.images.badge, ...((c.images || {}).badge || {}), when: Array.isArray(c.images?.badge?.when) ? c.images.badge.when : [] },
       background: { ...base.images.background, ...((c.images || {}).background || {}) },
       backgrounds: Array.isArray((c.images || {}).backgrounds) ? c.images.backgrounds : [],
     },

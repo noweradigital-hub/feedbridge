@@ -10,6 +10,7 @@ Stav k 2026-10-12. Interný nástroj: kontrola nad tým, čo ide z e-shopov do M
 - Bezpečné sťahovanie (`src/net.js`), upozornenia na webhook, galéria výstupu v UI.
 - Exportné profily (Meta, Google) s vlastnými pravidlami a URL, história nastavení s obnovením.
 - Magnific API: AI výrez a generovanie pozadí do knižnice; rembg kontajner v `deploy/compose.yml`.
+- Cenový badge na pôvodnej fotke: stará cena prečiarknutá, nová zvýraznená, voliteľne zľava a štítok kampane, farby a písmo značky, dva presety, živý náhľad v UI.
 - `deploy/compose.yml` pre zdieľaný Traefik, CI s buildom imageu na GHCR.
 - Testy: `npm test` (pipeline, obrázky, sieť, HTTP vrstva), bez internetu a kľúčov.
 
@@ -38,5 +39,5 @@ Premenné projektu: `FEEDBRIDGE_IMAGE`, `FEEDBRIDGE_HOST`, `ADMIN_PASSWORD`, vol
 
 ## Ďalšie kroky
 
-1. Šablóny s vrstvami: odznak, cena, logo, rámik, podmienky na vrstvách; režim cez pôvodnú fotku aj cez výrez.
+1. Ďalšie vrstvy šablóny: logo, rámik, vlastný text s podmienkami (cena a zľava sú hotové ako badge).
 2. Kampane s dátumom od–do (Black Friday, Vianoce) a automatickým návratom.

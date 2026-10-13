@@ -72,7 +72,7 @@ await t('uloženie pravidiel a nastavení obrázkov', async () => {
     { type: 'set', field: 'title', value: 'Demo | {title}' },
     { type: 'set', field: 'custom_label_0', value: 'test' },
   ];
-  proj.config.images = { ...proj.config.images, enabled: true, size: 500, background: { type: 'color', color: '#ddeeff' } };
+  proj.config.images = { ...proj.config.images, enabled: true, base: 'background', size: 500, background: { type: 'color', color: '#ddeeff' } };
   const res = await api('/projects/' + proj.id, { method: 'PUT', body: proj });
   assert.equal(res.status, 200);
   proj = await res.json();
@@ -238,6 +238,21 @@ await t('generovanie pozadia bez kľúča alebo so zlým vstupom skončí zrozum
   const r = await api('/assets/generate', { method: 'POST', body: { name: 'studio', prompt: 'empty studio backdrop, soft light' } });
   assert.equal(r.status, 502);
   assert.match((await r.json()).error, /MAGNIFIC_API_KEY/);
+});
+
+await t('náhľad obrázka s badge: neuložené nastavenie a značka z tela požiadavky', async () => {
+  const body = { index: 0, images: { base: 'photo', badge: { enabled: true, showWithoutSale: true } }, brand: { primary: '#0a4d8c' } };
+  const r = await api(`/projects/${proj.id}/preview-image`, { method: 'POST', body });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-badge'), '1');
+  const buf = Buffer.from(await r.arrayBuffer());
+  const m = await sharp(buf).metadata();
+  assert.equal(m.width, 500);
+  // karta vľavo dole má farbu značky
+  const px = [...(await sharp(buf).extract({ left: 28, top: 440, width: 1, height: 1 }).raw().toBuffer())];
+  assert.ok(Math.abs(px[0] - 0x0a) < 25 && Math.abs(px[1] - 0x4d) < 25 && Math.abs(px[2] - 0x8c) < 25, `farba karty: ${px}`);
+  const off = await api(`/projects/${proj.id}/preview-image`, { method: 'POST', body: { index: 0, images: { base: 'photo', badge: { enabled: false } } } });
+  assert.equal(off.headers.get('x-badge'), '0');
 });
 
 await t('slug sa po vytvorení nedá zmeniť', async () => {

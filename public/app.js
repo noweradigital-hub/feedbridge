@@ -75,7 +75,7 @@ function checkInput(label, obj, key, onchange) {
 function selectInput(label, obj, key, options, onchange) {
   return h('label', { class: 'f' }, label,
     h('select', { onchange: (e) => { obj[key] = e.target.value; markDirty(); onchange?.(); } },
-      Object.entries(options).map(([v, t]) => h('option', { value: v, selected: obj[key] === v }, t))));
+      Object.entries(options).map(([v, t]) => h('option', { value: v, selected: String(obj[key]) === v }, t))));
 }
 
 // ------------------------------------------------------------------ sidebar
@@ -100,6 +100,7 @@ async function openProject(id) {
   if (state.dirty && state.cur && state.cur.id !== id && !confirm('Máš neuložené zmeny. Zahodiť ich?')) return;
   state.cur = await api('/projects/' + id);
   state.dirty = false; state.preview = null; state.runs = []; state.output = null; state.viewProfile = null; state.versions = null;
+  imgPreview.box.replaceChildren(); imgPreview.index = 0; imgPreview.seq++;
   state.tab = state.tab || 'settings';
   document.querySelectorAll('.proj').forEach((el, i) => el.classList.toggle('active', state.projects[i]?.id === id));
   render();
@@ -252,7 +253,7 @@ function whenEditor(rule) {
   const wrap = h('div', {});
   const draw = () => {
     wrap.replaceChildren(
-      rule.when.length ? h('div', { class: 'when-title' }, 'Platí len keď (všetky podmienky):') : null,
+      ...(rule.when.length ? [h('div', { class: 'when-title' }, 'Platí len keď (všetky podmienky):')] : []), // null by sa vypísal ako text
       ...rule.when.map((c, i) => h('div', { class: 'cond' },
         h('input', { type: 'text', list: 'fields', value: c.field || '', placeholder: 'pole', oninput: (e) => { c.field = e.target.value; markDirty(); } }),
         h('select', { onchange: (e) => { c.op = e.target.value; markDirty(); draw(); } },
@@ -406,65 +407,159 @@ function backgroundEditor(bg, onchange) {
   return wrap;
 }
 
+// Náhľad obrázka prežíva prekreslenie záložky (zmena nastavenia ju celú stavia nanovo)
+const imgPreview = { box: h('div', { id: 'img-preview' }), index: 0, sale: true, timer: null, seq: 0 };
+
+async function genPreview() {
+  const p = state.cur;
+  if (!p || !p.source_url) { imgPreview.box.replaceChildren(h('p', { class: 'muted' }, 'Najprv nastav zdrojový feed.')); return; }
+  const seq = ++imgPreview.seq;
+  imgPreview.box.classList.add('loading');
+  try {
+    const res = await fetch(`/api/projects/${p.id}/preview-image`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: imgPreview.index, sale: imgPreview.sale, images: p.config.images, brand: p.config.brand, rules: p.config.rules, source_url: p.source_url }),
+    });
+    if (seq !== imgPreview.seq) return; // medzitým prišla novšia zmena
+    if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+    const title = decodeURIComponent(res.headers.get('X-Item-Title') || '');
+    const notes = decodeURIComponent(res.headers.get('X-Badge-Notes') || '');
+    const hasBadge = res.headers.get('X-Badge') === '1';
+    const unchanged = res.headers.get('X-Unchanged') === '1';
+    const index = Number(res.headers.get('X-Item-Index')) || 0;
+    const blob = await res.blob();
+    if (seq !== imgPreview.seq) return; // počas sťahovania prišla novšia zmena alebo iný projekt
+    imgPreview.index = index;
+    const url = URL.createObjectURL(blob);
+    imgPreview.box.replaceChildren(...[
+      h('p', { class: 'muted' }, `${imgPreview.index}. ${title}`, hasBadge ? null : h('span', { class: 'tag warning', style: 'margin-left:8px' }, unchanged ? 'tento produkt ostáva bez úpravy' : 'táto položka badge nedostane')),
+      notes ? h('p', { class: 'tag warning' }, notes) : null,
+      h('div', { class: 'preview-pair' },
+        h('img', { class: 'preview-img', src: url, alt: '' }),
+        h('div', {}, h('img', { class: 'preview-thumb', src: url, alt: '' }), h('p', { class: 'muted' }, 'veľkosť malej dlaždice v reklame'))),
+    ].filter(Boolean)); // replaceChildren by z null spravil text "null"
+  } catch (e) { if (seq === imgPreview.seq) imgPreview.box.replaceChildren(h('p', { style: 'color:var(--err)' }, e.message)); }
+  finally { if (seq === imgPreview.seq) imgPreview.box.classList.remove('loading'); }
+}
+/** Po zmene nastavenia náhľad prekreslí sám, s krátkym oneskorením (písanie do poľa). */
+function previewSoon() {
+  clearTimeout(imgPreview.timer);
+  imgPreview.timer = setTimeout(genPreview, 600);
+}
+
+const COLOR_TOKENS = { auto: 'Automaticky (podľa kontrastu)', primary: 'Hlavná farba značky', accent: 'Akcent značky', white: 'Biela', black: 'Čierna' };
+/** Farba ako odkaz na značku (zmena značky prefarbí všetko) alebo vlastná hodnota. */
+function colorToken(label, obj, key, { allowAuto = true } = {}) {
+  const custom = /^#[0-9a-f]{6}$/i.test(obj[key] || '');
+  const opts = { ...(allowAuto ? {} : { auto: undefined }), ...COLOR_TOKENS, custom: 'Vlastná…' };
+  if (!allowAuto) delete opts.auto;
+  return h('label', { class: 'f' }, label,
+    h('div', { class: 'row' },
+      h('select', { onchange: (e) => { obj[key] = e.target.value === 'custom' ? '#888888' : e.target.value; markDirty(); render(); previewSoon(); } },
+        Object.entries(opts).map(([v, t]) => h('option', { value: v, selected: custom ? v === 'custom' : obj[key] === v }, t))),
+      custom ? h('input', { type: 'color', value: obj[key], style: 'width:52px;flex:none', oninput: (e) => { obj[key] = e.target.value; markDirty(); previewSoon(); } }) : null));
+}
+
 function tabImages() {
   const p = state.cur;
   const s = p.config.images;
-  const previewBox = h('div', { id: 'img-preview' });
-  const idx = { index: 0 };
-  const genPreview = async () => {
-    previewBox.replaceChildren(h('p', { class: 'muted' }, 'Generujem…'));
-    try {
-      const res = await fetch(`/api/projects/${p.id}/preview-image`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ index: idx.index, images: s, rules: p.config.rules, source_url: p.source_url }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error || res.statusText);
-      const title = decodeURIComponent(res.headers.get('X-Item-Title') || '');
-      const url = URL.createObjectURL(await res.blob());
-      previewBox.replaceChildren(h('p', { class: 'muted' }, title), h('img', { class: 'preview-img', src: url }));
-    } catch (e) { previewBox.replaceChildren(h('p', { style: 'color:var(--err)' }, e.message)); }
-  };
+  const brand = p.config.brand;
+  const b = s.badge;
+  const live = () => previewSoon();
+  const relayout = () => { render(); previewSoon(); }; // zmena, ktorá mení aj zobrazené polia
+  const strip = b.preset === 'strip';
+  if (!imgPreview.box.firstChild && p.source_url && s.enabled) previewSoon();
   return h('div', {},
     h('div', { class: 'card' },
-      checkInput('Generovať obrázky s novým pozadím', s, 'enabled'),
+      checkInput('Upravovať obrázky produktov', s, 'enabled', relayout),
+      h('p', { class: 'muted' }, 'Pôvodná fotka ostáva, pridá sa na ňu cenový badge. Google profily dostávajú vždy fotku bez úprav.')),
+
+    h('h2', {}, 'Značka'),
+    h('div', { class: 'card' }, h('div', { class: 'grid' },
+      h('label', { class: 'f' }, 'Hlavná farba', h('input', { type: 'color', value: brand.primary, oninput: (e) => { brand.primary = e.target.value; markDirty(); live(); } })),
+      h('label', { class: 'f' }, 'Akcent (zľava, zvýraznenie)', h('input', { type: 'color', value: brand.accent, oninput: (e) => { brand.accent = e.target.value; markDirty(); live(); } })),
+      selectInput('Písmo', brand, 'font', { inter: 'Inter (neutrálne)', manrope: 'Manrope (geometrické)', 'barlow-condensed': 'Barlow Condensed (úzke)' }, live))),
+
+    h('h2', {}, 'Cenový badge'),
+    h('div', { class: 'card' },
+      checkInput('Zobraziť cenu na obrázku pri zľavnených produktoch', b, 'enabled', relayout),
       h('div', { class: 'grid' },
-        selectInput('Vystrihnutie produktu', s, 'provider', {
-          whitekey: 'Lokálne - biele pozadie → priehľadné (zadarmo)',
-          rembg: 'Vlastný rembg server (AI, zadarmo)',
-          magnific: 'Magnific API (AI, platené kreditmi)',
-          removebg: 'remove.bg API (platené)',
-          none: 'Bez vystrihnutia (obrázok už je PNG s priehľadnosťou)',
-        }),
-        selectInput('Spôsob vloženia', s, 'mode', {
-          cutout: 'Výrez produktu na pozadí',
-          photo: 'Celá fotka ako karta (lifestyle zábery)',
-          auto: 'Automaticky: biele pozadie → výrez, inak karta',
-        }),
-        textInput('Citlivosť bielej (200-255)', s, 'whiteThreshold', { type: 'number' }),
-        textInput('Veľkosť (px, štvorec)', s, 'size', { type: 'number' }),
-        textInput('Okraj (0-0.4)', s, 'padding', { type: 'number' }),
-        textInput('Posun produktu dole (-0.2 až 0.2)', s, 'offsetY', { type: 'number' }),
-        textInput('Kvalita JPEG', s, 'quality', { type: 'number' }),
-        checkInput('Jemný tieň pod produktom', s, 'shadow'),
-        checkInput('Pôvodný obrázok pridať ako dodatočný', s, 'keepOriginalAsAdditional'))),
-    h('h2', {}, 'Knižnica pozadí'),
-    h('div', { class: 'card' }, assetLibrary()),
-    h('h2', {}, 'Predvolené pozadie'),
-    h('div', { class: 'card' }, backgroundEditor(s.background)),
-    h('h2', {}, 'Pozadia podľa podmienok'),
-    h('p', { class: 'muted' }, 'Prvá zhoda vyhráva, ak žiadna nesedí, použije sa predvolené. Napr. kategória obsahuje „Oblečenie“ → teplý prechod.'),
-    s.backgrounds.map((b, i) => h('div', { class: 'card rule' },
-      h('div', { class: 'rule-head' }, h('b', {}, `Pozadie ${i + 1}`), h('span', { class: 'spacer' }),
-        h('button', { class: 'btn small danger', onclick: () => { s.backgrounds.splice(i, 1); markDirty(); render(); } }, 'Zmazať')),
-      backgroundEditor(b.background), whenEditor(b))),
-    h('button', { class: 'btn', onclick: () => { s.backgrounds.push({ when: [{ field: 'product_type', op: 'contains', value: '' }], background: { type: 'gradient', color: '#ffe8e8', color2: '#e8f0ff', angle: 160 } }); markDirty(); render(); } }, '+ Pridať pozadie podľa podmienky'),
+        selectInput('Tvar', b, 'preset', { card: 'Karta v rohu', strip: 'Pás cez celú šírku' }, relayout),
+        selectInput('Umiestnenie', b, 'position', strip
+          ? { 'bottom-left': 'Dole', 'top-left': 'Hore' }
+          : { 'bottom-left': 'Vľavo dole', 'bottom-center': 'Dole v strede', 'bottom-right': 'Vpravo dole', 'top-left': 'Vľavo hore', 'top-center': 'Hore v strede', 'top-right': 'Vpravo hore' }, live),
+        selectInput('Veľkosť', b, 'scale', { 0.85: 'Menší', 1: 'Štandardný', 1.15: 'Väčší', 1.3: 'Najväčší' }, live),
+        colorToken('Podklad', b, 'surface', { allowAuto: false }),
+        colorToken('Nová cena', b, 'highlight'),
+        colorToken('Stará cena a text', b, 'text'),
+        checkInput('Ukázať aj zľavu v %', b, 'showDiscount', live),
+        textInput('Štítok kampane (nepovinné)', b, 'label', { placeholder: 'napr. Black Friday', onchange: live }),
+        selectInput('Centy', b, 'decimals', { always: 'Vždy (23,00 €)', auto: 'Vynechať pri celých cenách (23 €)' }, live),
+        textInput('Najmenšia zľava v %, pri ktorej sa badge ukáže', b, 'minDiscount', { type: 'number', onchange: live }),
+        checkInput('Badge s cenou aj pri produktoch bez zľavy', b, 'showWithoutSale', live)),
+      h('details', {},
+        h('summary', {}, 'Pokročilé: z ktorého poľa je prečiarknutá cena a pre ktoré produkty'),
+        h('div', { class: 'grid', style: 'margin-top:10px' },
+          textInput('Pole s pôvodnou (prečiarknutou) cenou', b, 'referenceField', { list: 'fields', onchange: live }),
+          textInput('Pole s aktuálnou cenou', b, 'priceField', { list: 'fields', onchange: live })),
+        h('p', { class: 'muted' }, 'Pri oznámení zľavy má byť prečiarknutá najnižšia cena za posledných 30 dní pred zľavou. Bežná cena z e-shopu to nemusí byť. Ak zdroj takú cenu posiela v inom poli, nastav ho sem.'),
+        whenEditor(b))),
+
+    h('h2', {}, 'Formát obrázka'),
+    h('div', { class: 'card' }, h('div', { class: 'grid' },
+      textInput('Veľkosť (px, štvorec)', s, 'size', { type: 'number', onchange: live }),
+      selectInput('Fotka na štvorci', s, 'fit', { contain: 'Celá fotka (voľné miesto sa doplní)', cover: 'Orezať na stred' }, relayout),
+      s.fit === 'cover' ? null : h('label', { class: 'f' }, 'Farba doplneného miesta',
+        h('div', { class: 'row' },
+          h('select', { onchange: (e) => { s.fill = e.target.value === 'auto' ? 'auto' : '#ffffff'; markDirty(); relayout(); } },
+            h('option', { value: 'auto', selected: s.fill === 'auto' || !s.fill }, 'Automaticky podľa fotky'), h('option', { value: 'custom', selected: /^#/.test(s.fill || '') }, 'Vlastná…')),
+          /^#/.test(s.fill || '') ? h('input', { type: 'color', value: s.fill, style: 'width:52px;flex:none', oninput: (e) => { s.fill = e.target.value; markDirty(); live(); } }) : null)),
+      textInput('Kvalita JPEG', s, 'quality', { type: 'number', onchange: live }),
+      checkInput('Jednotný štvorcový formát aj pre produkty bez badge', s, 'applyToAll', live),
+      checkInput('Pôvodný obrázok pridať ako dodatočný', s, 'keepOriginalAsAdditional'))),
+
     h('h2', {}, 'Náhľad'),
     h('div', { class: 'card' },
-      h('p', { class: 'muted' }, 'Vyrenderuje obrázok pre vybranú položku zo zdrojového feedu s aktuálnym (aj neuloženým) nastavením. Pre remove.bg sa výrez ukladá do cache, takže sa neplatí dvakrát.'),
       h('div', { class: 'row' },
-        h('label', { class: 'f' }, 'Poradie položky', h('input', { type: 'number', value: 0, min: 0, style: 'width:90px', oninput: (e) => { idx.index = Number(e.target.value) || 0; } })),
-        h('button', { class: 'btn primary', style: 'margin-top:18px', onclick: genPreview }, 'Vygenerovať náhľad')),
-      previewBox),
+        h('label', { class: 'f' }, 'Poradie položky', h('input', { type: 'number', value: imgPreview.index, min: 0, style: 'width:90px', oninput: (e) => { imgPreview.index = Number(e.target.value) || 0; previewSoon(); } })),
+        h('label', { class: 'row', style: 'margin-top:18px' }, h('input', { type: 'checkbox', checked: imgPreview.sale, onchange: (e) => { imgPreview.sale = e.target.checked; previewSoon(); } }), 'preskočiť na zľavnený'),
+        h('button', { class: 'btn', style: 'margin-top:18px', onclick: () => { imgPreview.index += 1; genPreview(); } }, 'Ďalší produkt'),
+        h('button', { class: 'btn primary', style: 'margin-top:18px', onclick: genPreview }, 'Obnoviť náhľad')),
+      h('p', { class: 'muted' }, 'Náhľad sa prekresľuje sám pri každej zmene, aj pred uložením.'),
+      imgPreview.box),
+
+    h('details', { class: 'card', open: s.base === 'background' },
+      h('summary', {}, 'Výmena pozadia fotky (voliteľné)'),
+      h('label', { class: 'f check' }, h('input', { type: 'checkbox', checked: s.base === 'background', onchange: (e) => { s.base = e.target.checked ? 'background' : 'photo'; markDirty(); relayout(); } }), 'Vystrihnúť produkt a dať ho na nové pozadie'),
+      s.base !== 'background' ? null : h('div', {},
+        h('div', { class: 'grid' },
+          selectInput('Vystrihnutie produktu', s, 'provider', {
+            whitekey: 'Lokálne - biele pozadie → priehľadné (zadarmo)',
+            rembg: 'Vlastný rembg server (AI, zadarmo)',
+            magnific: 'Magnific API (AI, platené kreditmi)',
+            removebg: 'remove.bg API (platené)',
+            none: 'Bez vystrihnutia (obrázok už je PNG s priehľadnosťou)',
+          }, live),
+          selectInput('Spôsob vloženia', s, 'mode', {
+            cutout: 'Výrez produktu na pozadí',
+            photo: 'Celá fotka ako karta (lifestyle zábery)',
+            auto: 'Automaticky: čisté pozadie → výrez, inak karta',
+          }, live),
+          textInput('Citlivosť bielej (200-255)', s, 'whiteThreshold', { type: 'number', onchange: live }),
+          textInput('Okraj (0-0.4)', s, 'padding', { type: 'number', onchange: live }),
+          textInput('Posun produktu dole (-0.2 až 0.2)', s, 'offsetY', { type: 'number', onchange: live }),
+          checkInput('Jemný tieň pod produktom', s, 'shadow', live)),
+        h('h2', {}, 'Knižnica pozadí'),
+        assetLibrary(),
+        h('h2', {}, 'Predvolené pozadie'),
+        backgroundEditor(s.background, live),
+        h('h2', {}, 'Pozadia podľa podmienok'),
+        h('p', { class: 'muted' }, 'Prvá zhoda vyhráva, ak žiadna nesedí, použije sa predvolené.'),
+        s.backgrounds.map((bg, i) => h('div', { class: 'card rule' },
+          h('div', { class: 'rule-head' }, h('b', {}, `Pozadie ${i + 1}`), h('span', { class: 'spacer' }),
+            h('button', { class: 'btn small danger', onclick: () => { s.backgrounds.splice(i, 1); markDirty(); relayout(); } }, 'Zmazať')),
+          backgroundEditor(bg.background, live), whenEditor(bg))),
+        h('button', { class: 'btn', onclick: () => { s.backgrounds.push({ when: [{ field: 'product_type', op: 'contains', value: '' }], background: { type: 'gradient', color: '#ffe8e8', color2: '#e8f0ff', angle: 160 } }); markDirty(); render(); } }, '+ Pridať pozadie podľa podmienky'))),
     h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))));
 }
 
@@ -572,7 +667,7 @@ function tabRuns() {
   const show = async (id) => {
     const r = await api('/runs/' + id);
     logBox.replaceChildren(h('pre', { class: 'log' }, r.log || '(prázdny log)'),
-      r.summary?.warnings?.length ? h('details', { open: true }, h('summary', {}, `Upozornenia (${r.summary.warnings.length})`), h('pre', { class: 'log' }, r.summary.warnings.join('\n'))) : null);
+      ...(r.summary?.warnings?.length ? [h('details', { open: true }, h('summary', {}, `Upozornenia (${r.summary.warnings.length})`), h('pre', { class: 'log' }, r.summary.warnings.join('\n')))] : []));
   };
   return h('div', {},
     state.runs.length ? h('table', {},

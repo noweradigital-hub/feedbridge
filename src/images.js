@@ -6,6 +6,7 @@ import { config } from './config.js';
 import { testWhen } from './feed/rules.js';
 import { safeFetch } from './net.js';
 import { removeBackground as magnificRemoveBackground } from './magnific.js';
+import { resolveBadge, renderBadge, isHex, stripHeight } from './badge.js';
 
 const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
 const DAY = 86_400_000;
@@ -259,41 +260,48 @@ export async function originalJpeg(hash) {
  * a položí sa na pozadie ako karta. Lokálny výrez (whitekey) vie len takmer bielu,
  * AI výrez zvládne akékoľvek jednofarebné štúdiové pozadie (béžové, sivé…).
  */
-async function resolveMode(orig, s) {
-  if (s.mode === 'photo') return 'photo';
-  if (s.mode !== 'auto') return 'cutout';
-  const src = await fs.readFile(orig.file);
-  const meta = await untrusted(src).metadata();
+/**
+ * Okraj fotky na zmenšenine 64×64: podiel takmer bielych pixelov, medián farby a podiel pixelov
+ * blízko mediánu (jednofarebné štúdiové pozadie má 0.85-1.00, lifestyle fotka pod 0.55).
+ */
+async function borderStats(src, whiteThreshold = 238) {
   const n = 64;
-  if (meta.hasAlpha) {
-    const a = await untrusted(src).rotate().resize(n, n, { fit: 'fill' }).ensureAlpha().extractChannel(3).raw().toBuffer();
-    let clear = 0;
-    for (const v of a) if (v < 250) clear++;
-    if (clear > n) return 'cutout';
-  }
   const px = await untrusted(src).rotate().flatten({ background: '#ffffff' }).resize(n, n, { fit: 'fill' }).removeAlpha().raw().toBuffer();
-  const t = Number(s.whiteThreshold) || 238;
   const border = [[], [], []];
   let white = 0;
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
       if (x > 1 && x < n - 2 && y > 1 && y < n - 2) continue; // len okrajový pás
       const i = (y * n + x) * 3;
-      if (px[i] >= t && px[i + 1] >= t && px[i + 2] >= t) white++;
+      if (px[i] >= whiteThreshold && px[i + 1] >= whiteThreshold && px[i + 2] >= whiteThreshold) white++;
       for (let c = 0; c < 3; c++) border[c].push(px[i + c]);
     }
   }
   const total = border[0].length;
-  if (white / total >= 0.85) return 'cutout';
-  if (!AI_PROVIDERS.includes(s.provider)) return 'photo';
-  // štúdiová fotka: drvivá väčšina okraja má takmer rovnakú farbu ako jeho medián
-  // (namerané na reálnom katalógu: štúdio 0.85-1.00, lifestyle pod 0.55)
   const median = border.map((ch) => [...ch].sort((p, q) => p - q)[total >> 1]);
   let close = 0;
   for (let k = 0; k < total; k++) {
     if (border.every((ch, c) => Math.abs(ch[k] - median[c]) <= BORDER_TOLERANCE)) close++;
   }
-  return close / total >= 0.8 ? 'cutout' : 'photo';
+  return { white: white / total, uniform: close / total, median };
+}
+
+async function resolveMode(orig, s) {
+  if (s.mode === 'photo') return 'photo';
+  if (s.mode !== 'auto') return 'cutout';
+  const src = await fs.readFile(orig.file);
+  const meta = await untrusted(src).metadata();
+  if (meta.hasAlpha) {
+    const n = 64;
+    const a = await untrusted(src).rotate().resize(n, n, { fit: 'fill' }).ensureAlpha().extractChannel(3).raw().toBuffer();
+    let clear = 0;
+    for (const v of a) if (v < 250) clear++;
+    if (clear > n) return 'cutout';
+  }
+  const st = await borderStats(src, Number(s.whiteThreshold) || 238);
+  if (st.white >= 0.85) return 'cutout';
+  if (!AI_PROVIDERS.includes(s.provider)) return 'photo';
+  return st.uniform >= 0.8 ? 'cutout' : 'photo'; // jednofarebný okraj = štúdiová fotka
 }
 
 // ---------------------------------------------------------------- pozadie
@@ -357,10 +365,13 @@ function layout(s) {
   return { size, box: Math.round(size * (1 - 2 * pad)), offset: Math.round((Number(s.offsetY) || 0) * size) };
 }
 
-const jpeg = (img, s) => img.jpeg({ quality: Math.min(100, Math.max(50, Number(s.quality) || 88)), mozjpeg: true }).toBuffer();
+// s textom (badge) bez podvzorkovania farieb, inak sú hrany číslic na farebnom podklade rozmazané
+const jpeg = (img, s, sharpText = false) => img.jpeg({
+  quality: Math.min(100, Math.max(50, Number(s.quality) || 88)), mozjpeg: true, ...(sharpText ? { chromaSubsampling: '4:4:4' } : {}),
+}).toBuffer();
 
 /** Výrez produktu na pozadí, voliteľne s tieňom pod produktom. */
-async function composeCutout(cutoutBuf, bg, s) {
+async function composeCutout(cutoutBuf, bg, s, overlay = []) {
   const { size, box, offset } = layout(s);
   const trimmed = await untrusted(cutoutBuf).trim({ threshold: 5 }).toBuffer().catch(() => cutoutBuf);
   const prod = await untrusted(trimmed).resize(box, box, { fit: 'inside' }).png().toBuffer();
@@ -381,12 +392,12 @@ async function composeCutout(cutoutBuf, bg, s) {
       top: Math.max(0, Math.min(size - (sh + 80), Math.round(top + pm.height - sh))),
     });
   }
-  layers.push({ input: prod, left, top });
-  return jpeg(sharp(bg).composite(layers), s);
+  layers.push({ input: prod, left, top }, ...overlay);
+  return jpeg(sharp(bg).composite(layers), s, overlay.length > 0);
 }
 
 /** Celá fotka ako karta so zaoblenými rohmi (lifestyle zábery, kde výrez nedáva zmysel). */
-async function composePhoto(photoBuf, bg, s) {
+async function composePhoto(photoBuf, bg, s, overlay = []) {
   const { size, box, offset } = layout(s);
   const raw = await untrusted(photoBuf).rotate().flatten({ background: '#ffffff' }).resize(box, box, { fit: 'inside' }).png().toBuffer();
   const pm = await sharp(raw).metadata();
@@ -404,31 +415,109 @@ async function composePhoto(photoBuf, bg, s) {
       <rect x="${left}" y="${top + Math.round(size * 0.012)}" width="${pm.width}" height="${pm.height}" rx="${r}" ry="${r}" fill="#000" fill-opacity="0.3" filter="url(#b)"/></svg>`;
     layers.push({ input: Buffer.from(svg), left: 0, top: 0 });
   }
-  layers.push({ input: card, left, top });
-  return jpeg(sharp(bg).composite(layers), s);
+  layers.push({ input: card, left, top }, ...overlay);
+  return jpeg(sharp(bg).composite(layers), s, overlay.length > 0);
 }
 
-async function render(orig, item, s, bgSource) {
+/**
+ * Pôvodná fotka na štvorcovom plátne bez zásahu do pozadia (základ pre cenový badge).
+ * fit=contain: celá fotka; voľné miesto vyplní farba okraja fotky (štúdiové pozadie tak plynule
+ * pokračuje), pri lifestyle fotke jej rozmazaná kópia s mäkkým prechodom. fit=cover: orez na stred.
+ * reserve = výška pásu hore/dole, do ktorej fotka nezasahuje (päta s cenou produkt nezakryje).
+ * Vráti PNG plátna.
+ */
+async function originalCanvas(photoBuf, s, reserve = { top: 0, bottom: 0 }) {
+  const size = clampSize(s);
+  const areaH = size - reserve.top - reserve.bottom;
+  const flat = () => untrusted(photoBuf).rotate().flatten({ background: '#ffffff' });
+  const cover = s.fit === 'cover';
+  let fg = await flat().resize(size, areaH, { fit: cover ? 'cover' : 'inside' }).png().toBuffer();
+  const fm = await sharp(fg).metadata();
+  const left = Math.round((size - fm.width) / 2);
+  const top = reserve.top + Math.round((areaH - fm.height) / 2);
+  if (fm.width === size && fm.height === size) return fg;
+  let bg;
+  const st = isHex(s.fill) ? null : await borderStats(photoBuf);
+  if (isHex(s.fill) || st.uniform >= 0.8) {
+    const background = isHex(s.fill) ? s.fill : { r: st.median[0], g: st.median[1], b: st.median[2] };
+    bg = await sharp({ create: { width: size, height: size, channels: 3, background } }).png().toBuffer();
+  } else {
+    bg = await flat().resize(size, size, { fit: 'cover' }).blur(size / 27).modulate({ brightness: 0.94, saturation: 0.9 }).png().toBuffer();
+    // ostrý šev medzi fotkou a rozmazaným okolím pôsobí lacno: voľné hrany fotky sa do okolia rozplynú
+    const f = Math.round(size * 0.03);
+    const sides = fm.width < size, ends = fm.height < areaH;
+    if (sides || ends) {
+      const stops = (a, b) => `<stop offset="0" stop-color="#fff" stop-opacity="${a}"/><stop offset="1" stop-color="#fff" stop-opacity="${b}"/>`;
+      let m = `<rect width="${fm.width}" height="${fm.height}" fill="#fff"/>`;
+      const erase = (x, y, w, h, x1, y1, x2, y2, id) => `<defs><linearGradient id="${id}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops(1, 0)}</linearGradient></defs>`
+        + `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#000"/><rect x="${x}" y="${y}" width="${w}" height="${h}" fill="url(#${id})"/>`;
+      if (sides) m += erase(0, 0, f, fm.height, 1, 0, 0, 0, 'l') + erase(fm.width - f, 0, f, fm.height, 0, 0, 1, 0, 'r');
+      if (ends) m += erase(0, 0, fm.width, f, 0, 1, 0, 0, 't') + erase(0, fm.height - f, fm.width, f, 0, 0, 0, 1, 'b');
+      const mask = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${fm.width}" height="${fm.height}">${m}</svg>`)).extractChannel(0).raw().toBuffer();
+      fg = await sharp(fg).removeAlpha().joinChannel(mask, { raw: { width: fm.width, height: fm.height, channels: 1 } }).png().toBuffer();
+    }
+  }
+  return sharp(bg).composite([{ input: fg, left, top }]).png().toBuffer();
+}
+
+async function composeOriginal(photoBuf, s, badge) {
+  const size = clampSize(s);
+  if (!badge) return jpeg(sharp(await originalCanvas(photoBuf, s)), s);
+  const strip = badge.preset === 'strip';
+  const h = strip ? stripHeight(badge, size) : 0;
+  const canvas = await originalCanvas(photoBuf, s, strip ? { top: badge.position === 'top' ? h : 0, bottom: badge.position === 'top' ? 0 : h } : undefined);
+  return jpeg(sharp(canvas).composite([{ input: renderBadge(badge, size, size), left: 0, top: 0 }]), s, true);
+}
+
+/** base=background: pôvodná výmena pozadia; base=photo: pôvodná fotka. Badge je vrstva navrch oboch. */
+const usesBackground = (s) => s.base === 'background';
+
+async function render(orig, item, s, bgSource, badge) {
+  const size = clampSize(s);
+  if (!usesBackground(s)) return composeOriginal(await fs.readFile(orig.file), s, badge);
+  const overlay = badge ? [{ input: renderBadge(badge, size, size), left: 0, top: 0 }] : []; // nad vymeneným pozadím leží badge navrchu
   const mode = await resolveMode(orig, s);
-  const bg = await makeBackground(pickBackground(item, s), clampSize(s), bgSource);
-  if (mode === 'photo') return composePhoto(await fs.readFile(orig.file), bg, s);
-  return composeCutout(await getCutout(orig, s), bg, s);
+  const bg = await makeBackground(pickBackground(item, s), size, bgSource);
+  if (mode === 'photo') return composePhoto(await fs.readFile(orig.file), bg, s, overlay);
+  return composeCutout(await getCutout(orig, s), bg, s, overlay);
 }
 
-/** Vyrenderuje obrázok bez zapisovania do verejného priečinka (náhľad v UI). */
-export async function renderPreview(url, item, s) {
+/**
+ * Čo sa s položkou stane: badge (alebo null) a či sa obrázok vôbec generuje.
+ * Pri pôvodnej fotke bez badge sa obrázok nemení, pokiaľ nie je zapnuté "jednotný formát pre všetky".
+ */
+export function imagePlan(item, s, brand) {
+  const badge = resolveBadge(item, s.badge, brand);
+  return { badge, generate: usesBackground(s) || !!badge || !!s.applyToAll };
+}
+
+/** Vyrenderuje obrázok bez zapisovania do verejného priečinka (náhľad v UI). Vráti { jpg, badge }. */
+export async function renderPreview(url, item, s, brand) {
   const orig = await fetchCached(url, 'orig');
-  return render(orig, item, s, await backgroundSource(pickBackground(item, s)));
+  const { badge, generate } = imagePlan(item, s, brand);
+  if (!generate) {
+    // produkt, ktorého obrázok sa vo feede nemení: náhľad ukáže pôvodnú fotku, nie vymyslený štvorec
+    const size = clampSize(s);
+    const jpg = await untrusted(await fs.readFile(orig.file)).rotate().flatten({ background: '#ffffff' })
+      .resize(size, size, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
+    return { jpg, badge: null, unchanged: true };
+  }
+  const bgSource = usesBackground(s) ? await backgroundSource(pickBackground(item, s)) : null;
+  return { jpg: await render(orig, item, s, bgSource, badge), badge, unchanged: false };
 }
 
 /**
  * Vyrobí (alebo znovu použije) obrázok pre položku.
- * Vráti { file, cached } kde file je "slug/hash.jpg".
+ * Vráti { file, cached } kde file je "slug/hash.jpg", alebo { file: null }, ak sa obrázok nemení.
  */
-export async function ensureImage(slug, url, item, s) {
-  const bgSpec = pickBackground(item, s);
-  const [orig, bgSource] = await Promise.all([fetchCached(url, 'orig'), backgroundSource(bgSpec)]);
-  const settingsKey = JSON.stringify({
+export async function ensureImage(slug, url, item, s, brand) {
+  const { badge, generate } = imagePlan(item, s, brand);
+  if (!generate) return { file: null, cached: false };
+  const background = usesBackground(s);
+  const bgSpec = background ? pickBackground(item, s) : null;
+  const [orig, bgSource] = await Promise.all([fetchCached(url, 'orig'), background ? backgroundSource(bgSpec) : null]);
+  // Kľúč pre výmenu pozadia bez badge je zámerne rovnaký ako v starších verziách (obrázky sa neprerábajú).
+  const key = background ? {
     src: orig.hash,
     provider: s.provider,
     mode: s.mode || 'cutout',
@@ -438,18 +527,19 @@ export async function ensureImage(slug, url, item, s) {
     size: s.size, padding: s.padding, offsetY: s.offsetY, shadow: s.shadow, quality: s.quality,
     bg: bgSpec,
     bgSrc: bgSource?.hash || '',
-  });
-  const name = sha1(settingsKey).slice(0, 24) + '.jpg';
+  } : { src: orig.hash, base: 'photo', size: s.size, fit: s.fit === 'cover' ? 'cover' : 'contain', fill: isHex(s.fill) ? s.fill : 'auto', quality: s.quality };
+  if (badge) { const { notes: _n, ...look } = badge; key.badge = look; }
+  const name = sha1(JSON.stringify(key)).slice(0, 24) + '.jpg';
   const dir = path.join(config.imagesDir, slug);
   const file = path.join(dir, name);
-  touch(cutoutFile(orig, s)); // používaný výrez nesmie vypadnúť z cache, aj keď sa práve nečíta
+  if (background) touch(cutoutFile(orig, s)); // používaný výrez nesmie vypadnúť z cache, aj keď sa práve nečíta
   if (await exists(file)) return { file: `${slug}/${name}`, cached: true };
   let created = false; // true len pre volajúceho, ktorý súbor reálne vyrobil
   await once(file, async () => {
     if (await exists(file)) return;
     created = true;
     await fs.mkdir(dir, { recursive: true });
-    await writeAtomic(file, await render(orig, item, s, bgSource));
+    await writeAtomic(file, await render(orig, item, s, bgSource, badge));
   });
   return { file: `${slug}/${name}`, cached: !created };
 }

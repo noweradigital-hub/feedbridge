@@ -36,22 +36,19 @@ export function stripHtml(s) {
     .trim();
 }
 
+/**
+ * "29,90 EUR", "1 234,50 CZK", "1,234.50 USD", "EUR 12.90" -> { amount, currency }.
+ * Zámerne prísne: čomu sa nedá jednoznačne rozumieť, to je null. Cena sa môže vypáliť
+ * do obrázka a zle prečítaná suma ("1,234,567" ako 1,23) je horšia než žiadna.
+ * Skupiny po troch čísliciach sú tisíce; desatinná časť má 1-2 číslice.
+ */
 export function parsePrice(v) {
-  if (typeof v !== 'string' || !v.trim()) return null;
-  const m = v.match(/(-?[\d][\d\s.,]*)\s*([A-Za-z]{3})?/);
+  if (typeof v !== 'string') return null;
+  const m = /^\s*([A-Za-z]{3})?\s*(\d{1,3}(?:[ \u00a0.,']\d{3})+|\d+)(?:[.,](\d{1,2}))?\s*([A-Za-z]{3})?\s*$/.exec(v);
   if (!m) return null;
-  let num = m[1].replace(/\s/g, '');
-  const lastComma = num.lastIndexOf(',');
-  const lastDot = num.lastIndexOf('.');
-  if (lastComma > -1 && lastDot > -1) {
-    // posledný oddeľovač je desatinný
-    num = lastComma > lastDot ? num.replace(/\./g, '').replace(',', '.') : num.replace(/,/g, '');
-  } else if (lastComma > -1) {
-    num = num.replace(',', '.');
-  }
-  const n = parseFloat(num);
+  const n = Number(`${m[2].replace(/[^\d]/g, '')}.${m[3] || '0'}`);
   if (!Number.isFinite(n)) return null;
-  return { amount: n, currency: m[2] ? m[2].toUpperCase() : '' };
+  return { amount: n, currency: (m[4] || m[1] || '').toUpperCase() };
 }
 
 export function formatPrice(amount, currency) {

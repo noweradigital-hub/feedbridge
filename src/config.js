@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { BADGE_DEFAULTS } from './badge.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
@@ -47,8 +48,14 @@ export function defaultProjectConfig() {
   return {
     profiles: [], // doplní normalizeProfiles: aspoň jeden profil so slugom projektu
     rules: [],
+    brand: { primary: '#14171c', accent: '#e11d48', font: 'inter' }, // farby a písmo značky pre badge
     images: {
       enabled: false,
+      base: 'photo', // photo = pôvodná fotka | background = výmena pozadia (nastavenia nižšie)
+      fit: 'contain', // contain = celá fotka na štvorci | cover = orez na stred
+      fill: 'auto', // farba voľného miesta pri contain: auto alebo #rrggbb
+      applyToAll: false, // aj produkty bez badge dostanú jednotný štvorcový formát
+      badge: { ...BADGE_DEFAULTS },
       provider: 'whitekey', // whitekey | rembg | magnific | removebg | none
       mode: 'cutout', // cutout = výrez na pozadí | photo = celá fotka ako karta | auto = podľa okrajov fotky
       whiteThreshold: 238,

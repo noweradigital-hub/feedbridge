@@ -60,6 +60,12 @@ Dáta: `DATA_DIR/feedbridge.db`, `feeds/<slug>.xml`, `images/<slug>/<hash>.jpg`,
 - História konfigurácie: tabuľka `config_versions` (posledných 30), obnovenie vracia pravidlá a nastavenia, zoznam profilov a ich URL necháva.
 - Magnific API (`src/magnific.js`, `MAGNIFIC_API_KEY`, hlavička `x-magnific-api-key`): provider výrezu `magnific` a generovanie pozadí do knižnice (`POST /api/assets/generate`). API si fotku sťahuje samo z URL a nevie WebP, preto verejná cesta `/src/<odtlačok>.jpg` (originál z cache ako JPEG).
 - Režim `auto`: biely okraj = výrez vždy; pri AI provideroch (rembg, magnific, removebg) aj jednofarebný štúdiový okraj (podiel pixelov okraja blízko mediánu ≥ 0,8). Lifestyle fotka ostáva celá.
+- Cenový badge (`src/badge.js`, `src/text.js`): vrstva na pôvodnej fotke (`images.base: 'photo'`), výmena pozadia (`'background'`) je voliteľná a badge vie ležať aj na nej. `resolveBadge()` rozhodne, či položka badge dostane (zľava v platnosti, rovnaká mena, `minDiscount`, `when`) a vráti celý vzhľad; ten ide do kľúča cache, takže zmena ceny, farby či textu = nový súbor a nová URL. Zmena vzhľadu v kóde = zvýšiť `BADGE_VERSION`.
+- Text sa kreslí ako krivky z pribalených fontov (`src/fonts`, OFL, latin + latin-ext) cez opentype.js. V Docker image nie sú systémové fonty, `<text>` v SVG by sa nevykreslil.
+- Presety: `card` (karta v rohu, leží na fotke) a `strip` (pás; pri pôvodnej fotke je to päta POD fotkou, fotku nezakrýva). Rozmery sú ladené na čitateľnosť na dlaždici ~150 px: nová cena 116-124 px pri plátne 1080, stará ~60 %, rovná čiara, žiadne prechody.
+- Farby badge sú odkazy na značku projektu (`config.brand`: primary, accent, font) alebo vlastný hex; nečitateľnú kombináciu renderer nahradí kontrastnou a vráti poznámku. Farby aj text idú do SVG len cez validáciu (hex) a krivky, nikdy ako surový reťazec.
+- Stará konfigurácia bez `images.base` = výmena pozadia (správanie sa nemení), nový projekt = pôvodná fotka. Bez badge a bez `applyToAll` sa obrázok produktu vôbec nemení.
+- Prečiarknutá cena sa berie z `badge.referenceField` (default `price`). Právne má ísť o najnižšiu cenu za 30 dní pred zľavou; nástroj ju nevie zistiť, musí prísť zo zdroja.
 
 ## Pasce (už raz zaúčali)
 

@@ -131,7 +131,8 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
       const url = fieldValue(item, 'image_link');
       if (!url) { ps.images.skipped++; return; }
       try {
-        const { file: out, cached } = await ensureImage(project.slug, url, item, img);
+        const { file: out, cached } = await ensureImage(project.slug, url, item, img, cfg.brand);
+        if (!out) { ps.images.skipped++; return; } // bez badge ostáva pôvodná fotka
         used.add(out);
         if (cached) ps.images.cached++; else ps.images.generated++;
         if (img.keepOriginalAsAdditional) {

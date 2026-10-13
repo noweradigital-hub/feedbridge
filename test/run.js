@@ -101,6 +101,11 @@ await t('parsePrice zvláda čiarku aj tisíce', () => {
   assert.deepEqual(parsePrice('29,90 EUR'), { amount: 29.9, currency: 'EUR' });
   assert.deepEqual(parsePrice('1 234,50 CZK'), { amount: 1234.5, currency: 'CZK' });
   assert.deepEqual(parsePrice('1,234.50 USD'), { amount: 1234.5, currency: 'USD' });
+  assert.deepEqual(parsePrice('1,234,567 HUF'), { amount: 1234567, currency: 'HUF' });
+  assert.deepEqual(parsePrice('12.345,67 EUR'), { amount: 12345.67, currency: 'EUR' });
+  assert.deepEqual(parsePrice('EUR 12.9'), { amount: 12.9, currency: 'EUR' });
+  assert.deepEqual(parsePrice('1299'), { amount: 1299, currency: '' });
+  for (const bad of ['', 'od 29,90 EUR', '29,90 EUR za kus', '12,3456 EUR', '1,23,456', '-5 EUR', 'abc']) assert.equal(parsePrice(bad), null, bad);
 });
 await t('parse: entity, CDATA, vnorené shipping, opakované additional_image_link', async () => {
   const { items } = parseFeed(feedXml(base));
@@ -440,14 +445,14 @@ await t('režim auto: biele pozadie = výrez, lifestyle fotka = celá karta', as
   const s = { ...imgCfg, mode: 'auto', shadow: false, padding: 0.1, background: { type: 'color', color: '#112233' }, backgrounds: [] };
   const px = async (buf, x, y) => [...(await sharp(buf).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer())];
   const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 14);
-  const life = await renderPreview(`${base}/life.jpg`, {}, s);
+  const life = (await renderPreview(`${base}/life.jpg`, {}, s)).jpg;
   // karta 416x312 v strede plátna 520: jej okraj má farbu fotky, nie pozadia
   assert.ok(near(await px(life, 70, 260), [0x8a, 0x6d, 0x4b]), 'lifestyle fotka má ostať celá');
   assert.ok(near(await px(life, 10, 10), [0x11, 0x22, 0x33]));
-  const pack = await renderPreview(`${base}/a.jpg`, {}, s);
+  const pack = (await renderPreview(`${base}/a.jpg`, {}, s)).jpg;
   // výrez je orezaný na produkt a zväčšený: na tomto mieste je už červený produkt, nie biely okraj fotky
   assert.ok(near(await px(pack, 70, 260), [0xc0, 0x39, 0x2b]), `biele pozadie má byť vystrihnuté: ${await px(pack, 70, 260)}`);
-  const forced = await renderPreview(`${base}/a.jpg`, {}, { ...s, mode: 'photo' });
+  const forced = (await renderPreview(`${base}/a.jpg`, {}, { ...s, mode: 'photo' })).jpg;
   assert.ok(near(await px(forced, 70, 260), [255, 255, 255]), 'režim photo necháva fotku celú');
 });
 await t('pozadie z knižnice sa použije a jeho výmena zmení výstupný súbor', async () => {
@@ -536,6 +541,118 @@ await t('rembg: požiadavky idú po jednej, posiela sa model a po výpadku sa op
     assert.equal(calls, 4); // 3 obrázky + 1 opakovanie
     assert.deepEqual([...models], ['isnet-general-use']);
   } finally { config.rembgUrl = ''; rembg.close(); }
+});
+
+console.log('Cenový badge');
+const { resolveBadge, renderBadge, contrast } = await import('../src/badge.js');
+const { layoutText } = await import('../src/text.js');
+const saleItem = { id: '1', price: '29,90 EUR', sale_price: '23.90 EUR' };
+await t('badge len pri zľave; ceny v slovenskom formáte; zľava a minimálna zľava', () => {
+  assert.equal(resolveBadge(saleItem, { enabled: false }, {}), null);
+  assert.equal(resolveBadge({ price: '10.00 EUR' }, { enabled: true }, {}), null);
+  assert.equal(resolveBadge({ price: '10.00 EUR', sale_price: '12.00 EUR' }, { enabled: true }, {}), null);
+  const b = resolveBadge(saleItem, { enabled: true, showDiscount: true }, {});
+  assert.deepEqual([b.old.number, b.now.number, b.now.symbol, b.discount], ['29,90', '23,90', '€', '−20 %']);
+  assert.equal(resolveBadge(saleItem, { enabled: true, minDiscount: 25 }, {}), null);
+  const single = resolveBadge({ price: '1299.00 CZK' }, { enabled: true, showWithoutSale: true, decimals: 'auto' }, {});
+  assert.deepEqual([single.old, single.now.number, single.now.symbol], [null, '1299', 'Kč']);
+  assert.equal(resolveBadge({ price: '12990.50 EUR', sale_price: '9990.00 EUR' }, { enabled: true }, {}).old.number, '12 990,50');
+  assert.equal(resolveBadge(saleItem, { enabled: true, when: [{ field: 'id', op: 'eq', value: '2' }] }, {}), null);
+});
+await t('na obrázku je vždy skutočná predajná cena a zľava sa neprikrášľuje', () => {
+  // zľava pod hranicou: bez prečiarknutia, ale cena musí byť tá zľavnená, nie bežná
+  const small = resolveBadge({ price: '100 EUR', sale_price: '95 EUR' }, { enabled: true, minDiscount: 10, showWithoutSale: true }, {});
+  assert.deepEqual([small.old, small.now.number, small.discount], [null, '95,00', null]);
+  assert.equal(resolveBadge({ price: '100 EUR', sale_price: '95 EUR' }, { enabled: true, minDiscount: 10 }, {}), null);
+  // hranica sa porovnáva so skutočnou zľavou (9,51 % nie je 10 %)
+  assert.equal(resolveBadge({ price: '100 EUR', sale_price: '90.49 EUR' }, { enabled: true, minDiscount: 10 }, {}), null);
+  assert.ok(resolveBadge({ price: '100 EUR', sale_price: '90.00 EUR' }, { enabled: true, minDiscount: 10 }, {}));
+  // zaokrúhľuje sa nadol: 99,9 % nie je 100 %, presných 20 % ostáva 20 %
+  assert.equal(resolveBadge({ price: '100 EUR', sale_price: '0.10 EUR' }, { enabled: true, showDiscount: true }, {}).discount, '−99 %');
+  assert.equal(resolveBadge({ price: '29.90 EUR', sale_price: '23.92 EUR' }, { enabled: true, showDiscount: true }, {}).discount, '−20 %');
+  // zle čitateľná cena sa na obrázok nedostane vôbec
+  assert.equal(resolveBadge({ price: '2000000 HUF', sale_price: 'od 1,2 mil. HUF' }, { enabled: true }, {}), null);
+  assert.equal(resolveBadge({ price: '2000000 HUF', sale_price: '1,234,567 HUF' }, { enabled: true }, {}).now.number, '1 234 567,00');
+  // referenčná cena nižšia než predajná: žiadne prečiarknutie
+  assert.equal(resolveBadge({ price: '100 EUR', sale_price: '80 EUR', lowest_price_30d: '75 EUR' }, { enabled: true, referenceField: 'lowest_price_30d' }, {}), null);
+});
+await t('zľava mimo obdobia platnosti alebo v inej mene sa na obrázok nedostane', () => {
+  const at = Date.parse('2026-11-25T12:00:00+01:00');
+  const range = (a, b) => ({ ...saleItem, sale_price_effective_date: `${a}/${b}` });
+  assert.ok(resolveBadge(range('2026-11-20T00:00+01:00', '2026-11-30T23:59+01:00'), { enabled: true }, {}, at));
+  assert.equal(resolveBadge(range('2026-12-01T00:00+01:00', '2026-12-24T23:59+01:00'), { enabled: true }, {}, at), null); // ešte nezačala
+  assert.equal(resolveBadge(range('2026-11-01T00:00+01:00', '2026-11-10T23:59+01:00'), { enabled: true }, {}, at), null); // už skončila
+  const reg = resolveBadge(range('2026-12-01T00:00+01:00', '2026-12-24T23:59+01:00'), { enabled: true, showWithoutSale: true }, {}, at);
+  assert.deepEqual([reg.old, reg.now.number], [null, '29,90']); // bez zľavy sa ukáže bežná cena, nie budúca zľavová
+  assert.equal(resolveBadge({ price: '500.00 CZK', sale_price: '19.90 EUR' }, { enabled: true }, {}), null);
+});
+await t('farby značky: podklad a zvýraznenie z brandu, nečitateľná kombinácia sa opraví', () => {
+  const b = resolveBadge(saleItem, { enabled: true, surface: 'primary', highlight: 'accent' }, { primary: '#1f6f5c', accent: '#ffd400' });
+  assert.deepEqual([b.surface, b.text, b.highlight], ['#1f6f5c', '#ffffff', '#ffd400']);
+  assert.deepEqual(b.notes, []);
+  const bad = resolveBadge(saleItem, { enabled: true, surface: 'white', text: '#eeeeee', highlight: '#f2f2f2' }, {});
+  assert.ok(contrast(bad.text, bad.surface) >= 4.5 && contrast(bad.highlight, bad.surface) >= 3);
+  assert.equal(bad.notes.length, 2);
+  // referenčná cena z iného poľa (napr. najnižšia cena za 30 dní)
+  const ref = resolveBadge({ ...saleItem, lowest_price_30d: '26.00 EUR' }, { enabled: true, referenceField: 'lowest_price_30d', showDiscount: true }, {});
+  assert.deepEqual([ref.old.number, ref.discount], ['26,00', '−8 %']);
+});
+await t('text ide cez krivky: diakritika aj Kč/zł majú glyfy', () => {
+  for (const family of ['inter', 'manrope', 'barlow-condensed']) {
+    assert.ok(layoutText('Zľava ťahák Kč zł', { family, weight: 600, size: 50 }).d(0, 0).length > 500, family);
+    const w = (txt) => layoutText(txt, { family, weight: 800, size: 100 }).width;
+    assert.ok(w('Kč') > 60 && w('zł') > 40 && w('€') > 30, family);
+  }
+});
+await t('badge sa zmestí do plátna aj pri dlhej cene a pri každej pozícii', async () => {
+  const long = resolveBadge({ price: '129990.00 CZK', sale_price: '99990.00 CZK' }, { enabled: true, showDiscount: true, label: 'Black Friday výpredaj', scale: 1.3 }, {});
+  for (const preset of ['card', 'strip']) for (const position of ['top-left', 'top-right', 'bottom-center', 'bottom-right']) {
+    const spec = { ...long, preset, position: preset === 'strip' ? (position.startsWith('top') ? 'top' : 'bottom') : position };
+    const png = await sharp(renderBadge(spec, 600, 600)).png().toBuffer();
+    const { data, info } = await sharp(png).ensureAlpha().extractChannel(3).raw().toBuffer({ resolveWithObject: true });
+    assert.equal(info.width, 600);
+    // okrajový stĺpec musí pri karte ostať prázdny (nič nepretieklo za okraj)
+    if (preset === 'card') for (let y = 0; y < 600; y++) assert.ok(data[y * 600] < 30 && data[y * 600 + 599] < 30, `${position} pretiekol`);
+  }
+});
+await t('pôvodná fotka + badge: obrázok vznikne len pre zľavnené, zmena ceny = nový súbor', async () => {
+  const s = { ...imgCfg, base: 'photo', fit: 'contain', fill: 'auto', applyToAll: false, badge: { enabled: true } };
+  assert.deepEqual(await ensureImage('badge', `${base}/a.jpg`, { price: '10.00 EUR' }, s, {}), { file: null, cached: false });
+  const one = await ensureImage('badge', `${base}/a.jpg`, saleItem, s, {});
+  assert.ok(one.file && !one.cached);
+  assert.equal((await ensureImage('badge', `${base}/a.jpg`, saleItem, s, {})).file, one.file);
+  const cheaper = await ensureImage('badge', `${base}/a.jpg`, { ...saleItem, sale_price: '19.90 EUR' }, s, {});
+  assert.notEqual(cheaper.file, one.file);
+  assert.notEqual((await ensureImage('badge', `${base}/a.jpg`, saleItem, s, { primary: '#0a4d8c' })).file, one.file);
+  const meta = await sharp(path.join(tmp, 'images', one.file)).metadata();
+  assert.deepEqual([meta.width, meta.height, meta.format, meta.chromaSubsampling], [520, 520, 'jpeg', '4:4:4']);
+  // fotka 800x600 na štvorci: biele pozadie fotky pokračuje aj v doplnených pásoch, badge je tmavý vľavo dole
+  const px = async (x, y) => [...(await sharp(path.join(tmp, 'images', one.file)).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer())];
+  assert.ok((await px(260, 8)).every((v) => v > 235), 'doplnený pás má mať farbu okraja fotky');
+  assert.ok((await px(30, 440)).every((v) => v < 60), 'badge má byť vľavo dole'); // ľavý okraj karty, mimo textu
+  // jednotný formát pre všetky: aj položka bez zľavy dostane štvorec, ale bez badge
+  const all = await ensureImage('badge', `${base}/a.jpg`, { price: '10.00 EUR' }, { ...s, applyToAll: true }, {});
+  assert.ok(all.file);
+  const clean = await sharp(path.join(tmp, 'images', all.file)).extract({ left: 30, top: 440, width: 1, height: 1 }).raw().toBuffer();
+  assert.ok([...clean].every((v) => v > 200));
+});
+await t('náhľad produktu, ktorý sa nemení, ukáže pôvodnú fotku, nie štvorec', async () => {
+  const s = { ...imgCfg, base: 'photo', fit: 'cover', applyToAll: false, badge: { enabled: true } };
+  const r = await renderPreview(`${base}/a.jpg`, { price: '10.00 EUR' }, s, {});
+  const m = await sharp(r.jpg).metadata();
+  assert.deepEqual([r.unchanged, r.badge, m.width, m.height], [true, null, 520, 390]);
+  assert.equal((await renderPreview(`${base}/a.jpg`, saleItem, s, {})).unchanged, false);
+});
+await t('uložená konfigurácia spred badge ostáva pri výmene pozadia, nový projekt začína pôvodnou fotkou', () => {
+  const partial = projects.create({ name: 'Cez API', slug: 'cez-api-badge', config: { images: { enabled: true, badge: { enabled: true } } } });
+  assert.equal(partial.config.images.base, 'photo'); // neúplná nová konfigurácia nesmie zapnúť výmenu pozadia
+  projects.remove(partial.id);
+  assert.equal(project.config.images.base, 'background');
+  assert.equal(project.config.images.badge.enabled, false);
+  const fresh = projects.create({ name: 'Nový', slug: 'novy-badge' });
+  assert.equal(fresh.config.images.base, 'photo');
+  assert.deepEqual(fresh.config.brand, { primary: '#14171c', accent: '#e11d48', font: 'inter' });
+  projects.remove(fresh.id);
 });
 
 console.log('Upozornenia');

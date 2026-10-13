@@ -234,20 +234,49 @@ app.post('/api/projects/:id/preview', wrap(async (req, res) => {
 }));
 
 // Náhľad obrázka: ?index=N -> vyrenderuje N-tú položku zdrojového feedu s aktuálnym nastavením obrázkov
+// Náhľad sa pri ladení vzhľadu volá často: zdrojový feed si chvíľu pamätáme, nech nebúšime do e-shopu
+const previewSource = new Map();
+async function sourceItemsCached(url) {
+  const hit = previewSource.get(url);
+  if (hit && Date.now() - hit.at < 120_000) return hit.items;
+  const { items } = parseFeed(await fetchSource(url));
+  previewSource.clear(); // stačí posledný zdroj
+  previewSource.set(url, { at: Date.now(), items });
+  return items;
+}
+
+/**
+ * Náhľad obrázka s aktuálnym (aj neuloženým) nastavením. index = poradie položky v zdroji;
+ * sale=true posunie výber na najbližšiu položku so zľavou (aby bolo na badge čo ukázať).
+ */
 app.post('/api/projects/:id/preview-image', wrap(async (req, res) => {
   const p = projects.get(Number(req.params.id));
   if (!p) return res.status(404).json({ error: 'Projekt neexistuje' });
-  const images = { ...p.config.images, ...(req.body?.images || {}) };
-  const sourceUrl = req.body?.source_url || p.source_url;
-  const { items } = parseFeed(await fetchSource(sourceUrl));
-  const rules = req.body?.rules || p.config.rules;
-  const idx = Math.min(items.length - 1, Math.max(0, parseInt(req.body?.index, 10) || 0));
-  const { item } = applyRules(items[idx], rules);
+  const body = req.body || {};
+  const images = { ...p.config.images, ...(body.images || {}) };
+  if (body.images?.badge) images.badge = { ...p.config.images.badge, ...body.images.badge };
+  const brand = { ...p.config.brand, ...(body.brand || {}) };
+  const items = await sourceItemsCached(body.source_url || p.source_url);
+  if (!items.length) return res.status(422).json({ error: 'Zdrojový feed je prázdny' });
+  const rules = body.rules || p.config.rules;
+  let idx = Math.min(items.length - 1, Math.max(0, parseInt(body.index, 10) || 0));
+  let item = applyRules(items[idx], rules).item;
+  if (body.sale) {
+    for (let n = 0; n < items.length; n++) {
+      const j = (idx + n) % items.length;
+      const cand = applyRules(items[j], rules).item;
+      if (Number(fieldValue(cand, 'discount_pct')) > 0) { idx = j; item = cand; break; }
+    }
+  }
   const url = fieldValue(item, 'image_link');
   if (!url) return res.status(422).json({ error: 'Položka nemá image_link' });
-  const jpg = await renderPreview(url, item, images);
+  const { jpg, badge, unchanged } = await renderPreview(url, item, images, brand);
+  res.set('X-Unchanged', unchanged ? '1' : '0');
   res.set('Content-Type', 'image/jpeg');
   res.set('X-Item-Title', encodeURIComponent(fieldValue(item, 'title')));
+  res.set('X-Item-Index', String(idx));
+  res.set('X-Badge', badge ? '1' : '0');
+  if (badge?.notes.length) res.set('X-Badge-Notes', encodeURIComponent(badge.notes.join(' ')));
   res.send(jpg);
 }));
 
