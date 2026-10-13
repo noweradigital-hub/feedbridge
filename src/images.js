@@ -356,7 +356,15 @@ function pickBackground(item, s) {
 
 // ---------------------------------------------------------------- kompozícia
 
+/** base=background: pôvodná výmena pozadia; base=photo: pôvodná fotka. Badge je vrstva navrch oboch. */
+const usesBackground = (s) => s.base === 'background';
 const clampSize = (s) => Math.min(2000, Math.max(500, Number(s.size) || 1080));
+const RATIOS = { '1:1': 1, '4:5': 1.25, '7:8': 8 / 7 };
+/** Plátno pôvodnej fotky: šírka = veľkosť, výška podľa pomeru strán. Výmena pozadia je vždy štvorec. */
+function canvasOf(s) {
+  const w = clampSize(s);
+  return { w, h: usesBackground(s) ? w : Math.round(w * (RATIOS[s.ratio] || 1)) };
+}
 
 function layout(s) {
   const size = clampSize(s);
@@ -427,22 +435,22 @@ async function composePhoto(photoBuf, bg, s, overlay = []) {
  * Vráti PNG plátna.
  */
 async function originalCanvas(photoBuf, s, reserve = { top: 0, bottom: 0 }) {
-  const size = clampSize(s);
-  const areaH = size - reserve.top - reserve.bottom;
+  const { w: size, h: height } = canvasOf(s);
+  const areaH = height - reserve.top - reserve.bottom;
   const flat = () => untrusted(photoBuf).rotate().flatten({ background: '#ffffff' });
   const cover = s.fit === 'cover';
   let fg = await flat().resize(size, areaH, { fit: cover ? 'cover' : 'inside' }).png().toBuffer();
   const fm = await sharp(fg).metadata();
   const left = Math.round((size - fm.width) / 2);
   const top = reserve.top + Math.round((areaH - fm.height) / 2);
-  if (fm.width === size && fm.height === size) return fg;
+  if (fm.width === size && fm.height === height) return fg;
   let bg;
   const st = isHex(s.fill) ? null : await borderStats(photoBuf);
   if (isHex(s.fill) || st.uniform >= 0.8) {
     const background = isHex(s.fill) ? s.fill : { r: st.median[0], g: st.median[1], b: st.median[2] };
-    bg = await sharp({ create: { width: size, height: size, channels: 3, background } }).png().toBuffer();
+    bg = await sharp({ create: { width: size, height, channels: 3, background } }).png().toBuffer();
   } else {
-    bg = await flat().resize(size, size, { fit: 'cover' }).blur(size / 27).modulate({ brightness: 0.94, saturation: 0.9 }).png().toBuffer();
+    bg = await flat().resize(size, height, { fit: 'cover' }).blur(size / 27).modulate({ brightness: 0.94, saturation: 0.9 }).png().toBuffer();
     // ostrý šev medzi fotkou a rozmazaným okolím pôsobí lacno: voľné hrany fotky sa do okolia rozplynú
     const f = Math.round(size * 0.03);
     const sides = fm.width < size, ends = fm.height < areaH;
@@ -461,16 +469,13 @@ async function originalCanvas(photoBuf, s, reserve = { top: 0, bottom: 0 }) {
 }
 
 async function composeOriginal(photoBuf, s, badge) {
-  const size = clampSize(s);
+  const { w: size, h: height } = canvasOf(s);
   if (!badge) return jpeg(sharp(await originalCanvas(photoBuf, s)), s);
   const strip = badge.preset === 'strip';
   const h = strip ? stripHeight(badge, size) : 0;
   const canvas = await originalCanvas(photoBuf, s, strip ? { top: badge.position === 'top' ? h : 0, bottom: badge.position === 'top' ? 0 : h } : undefined);
-  return jpeg(sharp(canvas).composite([{ input: renderBadge(badge, size, size), left: 0, top: 0 }]), s, true);
+  return jpeg(sharp(canvas).composite([{ input: renderBadge(badge, size, height), left: 0, top: 0 }]), s, true);
 }
-
-/** base=background: pôvodná výmena pozadia; base=photo: pôvodná fotka. Badge je vrstva navrch oboch. */
-const usesBackground = (s) => s.base === 'background';
 
 async function render(orig, item, s, bgSource, badge) {
   const size = clampSize(s);
@@ -484,17 +489,20 @@ async function render(orig, item, s, bgSource, badge) {
 
 /**
  * Čo sa s položkou stane: badge (alebo null) a či sa obrázok vôbec generuje.
- * Pri pôvodnej fotke bez badge sa obrázok nemení, pokiaľ nie je zapnuté "jednotný formát pre všetky".
+ * ctx = { brand, at, campaign, layout, hidePrices, overlay } - akcia a nastavenie produktu
+ * (campaigns.js); overlay=false = čistý obrázok bez grafiky (profil "čistý").
+ * Pri pôvodnej fotke bez badge sa obrázok nemení, pokiaľ nie je zapnutý jednotný formát.
  */
-export function imagePlan(item, s, brand) {
-  const badge = resolveBadge(item, s.badge, brand);
+export function imagePlan(item, s, ctx = {}) {
+  const badge = ctx.overlay === false ? null
+    : resolveBadge(item, s.badge, ctx.brand, ctx.at, { campaign: ctx.campaign, layout: ctx.layout, hidePrices: ctx.hidePrices });
   return { badge, generate: usesBackground(s) || !!badge || !!s.applyToAll };
 }
 
 /** Vyrenderuje obrázok bez zapisovania do verejného priečinka (náhľad v UI). Vráti { jpg, badge }. */
-export async function renderPreview(url, item, s, brand) {
+export async function renderPreview(url, item, s, ctx = {}) {
   const orig = await fetchCached(url, 'orig');
-  const { badge, generate } = imagePlan(item, s, brand);
+  const { badge, generate } = imagePlan(item, s, ctx);
   if (!generate) {
     // produkt, ktorého obrázok sa vo feede nemení: náhľad ukáže pôvodnú fotku, nie vymyslený štvorec
     const size = clampSize(s);
@@ -510,8 +518,8 @@ export async function renderPreview(url, item, s, brand) {
  * Vyrobí (alebo znovu použije) obrázok pre položku.
  * Vráti { file, cached } kde file je "slug/hash.jpg", alebo { file: null }, ak sa obrázok nemení.
  */
-export async function ensureImage(slug, url, item, s, brand) {
-  const { badge, generate } = imagePlan(item, s, brand);
+export async function ensureImage(slug, url, item, s, ctx = {}) {
+  const { badge, generate } = imagePlan(item, s, ctx);
   if (!generate) return { file: null, cached: false };
   const background = usesBackground(s);
   const bgSpec = background ? pickBackground(item, s) : null;
@@ -527,7 +535,10 @@ export async function ensureImage(slug, url, item, s, brand) {
     size: s.size, padding: s.padding, offsetY: s.offsetY, shadow: s.shadow, quality: s.quality,
     bg: bgSpec,
     bgSrc: bgSource?.hash || '',
-  } : { src: orig.hash, base: 'photo', size: s.size, fit: s.fit === 'cover' ? 'cover' : 'contain', fill: isHex(s.fill) ? s.fill : 'auto', quality: s.quality };
+  } : {
+    src: orig.hash, base: 'photo', size: s.size, fit: s.fit === 'cover' ? 'cover' : 'contain', fill: isHex(s.fill) ? s.fill : 'auto', quality: s.quality,
+    ...(RATIOS[s.ratio] && s.ratio !== '1:1' ? { ratio: s.ratio } : {}), // štvorec má kľúč ako doteraz
+  };
   if (badge) { const { notes: _n, ...look } = badge; key.badge = look; }
   const name = sha1(JSON.stringify(key)).slice(0, 24) + '.jpg';
   const dir = path.join(config.imagesDir, slug);

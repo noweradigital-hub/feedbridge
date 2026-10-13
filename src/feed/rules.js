@@ -55,13 +55,48 @@ export function formatPrice(amount, currency) {
   return `${amount.toFixed(2)}${currency ? ' ' + currency : ''}`;
 }
 
+/**
+ * Zľava s obdobím platnosti (sale_price_effective_date = "začiatok/koniec" v ISO 8601):
+ * mimo obdobia sa zľavová cena neberie, inak by sa sľubovala zľava, ktorá ešte alebo už neplatí.
+ */
+function saleActive(item, at) {
+  const raw = scalar(item.sale_price_effective_date).trim();
+  if (!raw) return true;
+  const [from, to] = raw.split('/').map((x) => Date.parse(x.trim()));
+  if (Number.isNaN(from) || Number.isNaN(to)) return true; // nečitateľný rozsah nechávame na zdroj
+  return at >= from && at <= to;
+}
+
+/**
+ * Jediné miesto, kde sa rozhoduje o cene a zľave položky. Používajú ho podmienky pravidiel
+ * (discount_pct), akcie aj obrázok, takže sa nikdy nerozídu.
+ *  selling   = skutočná predajná cena (zľavová, ak platí a je nižšia než bežná; inak bežná)
+ *  reference = cena na porovnanie (prečiarknutá)
+ *  exactPct  = skutočná zľava voči referenčnej cene, pct = zaokrúhlená NADOL (99,9 % nie je 100 %)
+ */
+export function resolvePricing(item, { priceField = 'sale_price', referenceField = 'price' } = {}, at = Date.now()) {
+  const pf = priceField || 'sale_price'; // prázdne pole v nastavení = predvolené, vrátane kontroly platnosti zľavy
+  const regular = parsePrice(scalar(item.price));
+  const sale = pf === 'sale_price' && !saleActive(item, at) ? null : parsePrice(scalar(item[pf]));
+  const reference = parsePrice(scalar(item[referenceField || 'price']));
+  const same = (x, y) => !x?.currency || !y?.currency || x.currency === y.currency; // rôzne meny sa nedajú porovnať
+  const saleValid = !!sale && sale.amount > 0 && same(sale, regular) && (!regular || sale.amount < regular.amount);
+  const selling = saleValid ? sale : regular;
+  let exactPct = 0;
+  if (saleValid && reference && same(sale, reference) && sale.amount < reference.amount) exactPct = (1 - sale.amount / reference.amount) * 100;
+  return { selling, reference, exactPct, pct: Math.floor(exactPct + 1e-9) };
+}
+
 function scalar(v) {
   if (Array.isArray(v)) return typeof v[0] === 'string' ? v[0] : '';
   return typeof v === 'string' ? v : '';
 }
 
-/** Hodnota poľa vrátane dopočítaných. */
-export function fieldValue(item, field) {
+/**
+ * Hodnota poľa vrátane dopočítaných. ctx = { pricing: { priceField, referenceField }, at }:
+ * kto rozhoduje o grafike (akcie), posiela rovnaké polia a čas ako obrázok, aby discount_pct sedel s tým, čo je na ňom.
+ */
+export function fieldValue(item, field, ctx) {
   switch (field) {
     case 'price_num': {
       const p = parsePrice(scalar(item.price));
@@ -75,19 +110,15 @@ export function fieldValue(item, field) {
       const p = parsePrice(scalar(item.price));
       return p ? p.currency : '';
     }
-    case 'discount_pct': {
-      const p = parsePrice(scalar(item.price));
-      const s = parsePrice(scalar(item.sale_price));
-      if (!p || !s || p.amount <= 0 || s.amount >= p.amount) return '0';
-      return String(Math.round((1 - s.amount / p.amount) * 100));
-    }
+    case 'discount_pct':
+      return String(resolvePricing(item, ctx?.pricing, ctx?.at).pct); // rovnaký výpočet ako na obrázku (platnosť zľavy, mena, zaokrúhlenie nadol)
     default:
       return scalar(item[field]);
   }
 }
 
-export function testCondition(item, cond) {
-  const raw = fieldValue(item, cond.field);
+export function testCondition(item, cond, ctx) {
+  const raw = fieldValue(item, cond.field, ctx);
   const val = String(cond.value ?? '');
   let a = raw.toLowerCase();
   let b = val.toLowerCase();
@@ -116,9 +147,9 @@ export function testCondition(item, cond) {
   }
 }
 
-export function testWhen(item, when) {
+export function testWhen(item, when, ctx) {
   if (!Array.isArray(when) || !when.length) return true;
-  return when.every((c) => c && c.field && testCondition(item, c));
+  return when.every((c) => c && c.field && testCondition(item, c, ctx));
 }
 
 const FILTERS = {

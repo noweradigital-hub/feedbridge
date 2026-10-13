@@ -255,6 +255,84 @@ await t('náhľad obrázka s badge: neuložené nastavenie a značka z tela pož
   assert.equal(off.headers.get('x-badge'), '0');
 });
 
+await t('uloženie nad starším stavom sa odmietne (dve otvorené okná)', async () => {
+  const a = await (await api('/projects/' + proj.id)).json();
+  const b = structuredClone(a);
+  a.config.rules.push({ type: 'remove', field: 'mpn' });
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: a })).status, 200);
+  b.name = 'Prepíšem ťa';
+  const stale = await api('/projects/' + proj.id, { method: 'PUT', body: b });
+  assert.equal(stale.status, 409);
+  // karta otvorená pred aktualizáciou revíziu neposiela vôbec: tiež sa odmietne
+  const { rev: _r, ...noRev } = b;
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: noRev })).status, 409);
+  proj = await (await api('/projects/' + proj.id)).json();
+  assert.notEqual(proj.name, 'Prepíšem ťa');
+  proj.config.rules.pop();
+  proj = await (await api('/projects/' + proj.id, { method: 'PUT', body: proj })).json();
+});
+
+await t('produkty: zoznam, hromadné priradenie akcie, skupina variantov, zmazanie akcie', async () => {
+  // každý zápis nesie revíziu, s ktorou klient projekt načítal
+  const rev = async () => (await (await api('/projects/' + proj.id)).json()).rev;
+  const assign = async (body) => api(`/projects/${proj.id}/assign`, { method: 'POST', body: { rev: await rev(), ...body } });
+  let list = await (await api(`/projects/${proj.id}/products`)).json();
+  assert.equal(list.items.length, 1);
+  assert.deepEqual([list.items[0].id, list.items[0].campaign, list.items[0].source, list.items[0].price], ['1', null, 'none', '10.00 EUR']);
+  assert.equal((await assign({ ids: ['1'], set: { campaign: 'neexistuje' } })).status, 400);
+  assert.equal((await assign({ ids: [], set: { campaign: 'none' } })).status, 400);
+  assert.equal((await assign({ ids: ['__proto__'], set: { campaign: 'none' } })).status, 400);
+  assert.equal((await api(`/projects/${proj.id}/assign`, { method: 'POST', body: { ids: ['1'], set: { campaign: 'none' } } })).status, 409); // bez revízie
+  assert.equal((await api(`/projects/${proj.id}/assign`, { method: 'POST', body: { rev: -1, ids: ['1'], set: { campaign: 'none' } } })).status, 409);
+  const before = (await (await api(`/projects/${proj.id}/versions`)).json()).length;
+  const r = await assign({ ids: ['1', 'uz-nie-je', 'constructor'], groups: ['G9'], set: { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' } });
+  assert.equal(r.status, 400); // ID, ktoré by siahlo na prototyp objektu, sa odmietne celé
+  const ok = await assign({ ids: ['1', 'uz-nie-je'], groups: ['G9'], set: { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' } });
+  assert.equal(ok.status, 200);
+  const saved = await ok.json();
+  assert.deepEqual(saved.config.products['1'], { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' });
+  assert.deepEqual(saved.config.groups.G9, { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' });
+  assert.equal((await (await api(`/projects/${proj.id}/versions`)).json()).length, before + 1); // jedna zmena = jeden záznam
+  list = await (await api(`/projects/${proj.id}/products`)).json();
+  assert.deepEqual([list.items[0].campaign, list.items[0].source, list.items[0].layout], ['black-friday', 'manual', 'layout-2']);
+  assert.deepEqual(list.orphans, { products: ['uz-nie-je'], groups: ['G9'] });
+
+  // zmena celého produktu zmaže variantom len tie položky, ktoré sa menia, a všetko v jednom zápise
+  const g = await (await assign({ groups: ['G9'], reset: ['1'], set: { campaign: 'none' } })).json();
+  assert.deepEqual(g.config.products['1'], { layout: 'layout-2', prices: 'hide' });
+  assert.equal(g.config.groups.G9.campaign, 'none');
+  // variant môže výslovne prebiť nastavenie celého produktu predvolenou hodnotou
+  const ex = await (await assign({ ids: ['v1'], set: { campaign: 'auto', layout: '', prices: 'auto' }, explicit: true })).json();
+  assert.deepEqual(ex.config.products.v1, { campaign: 'auto', layout: 'default', prices: 'show' });
+
+  // návrat na predvolené hodnoty (bez "explicit") záznam odstráni
+  const cleared = await (await assign({ ids: ['uz-nie-je', 'v1'], groups: ['G9'], set: { campaign: 'auto', layout: '', prices: 'auto' } })).json();
+  assert.deepEqual([Object.keys(cleared.config.products), Object.keys(cleared.config.groups)], [['1'], []]);
+  await assign({ ids: ['1'], set: { campaign: 'black-friday' } });
+  // zmazaná akcia: priradenie produktu padá späť na automatiku, ostatné nastavenie ostáva
+  const cur = await (await api('/projects/' + proj.id)).json();
+  cur.config.campaigns = cur.config.campaigns.filter((c) => c.id !== 'black-friday');
+  proj = await (await api('/projects/' + proj.id, { method: 'PUT', body: cur })).json();
+  assert.deepEqual(proj.config.products['1'], { layout: 'layout-2', prices: 'hide' });
+  await assign({ ids: ['1'], set: { layout: '', prices: 'auto' } });
+  proj = await (await api('/projects/' + proj.id)).json();
+  assert.deepEqual(proj.config.products, {});
+});
+
+await t('náhľad podľa ID produktu so skúšobným nastavením a neuloženou akciou', async () => {
+  const body = { id: '1', images: { base: 'photo', badge: { enabled: true, preset: 'layout-1' } }, campaigns: [{ id: 'jar', name: 'Jarná akcia', color: '#0a4d8c' }], override: { campaign: 'jar' } };
+  const r = await api(`/projects/${proj.id}/preview-image`, { method: 'POST', body });
+  assert.equal(r.status, 200);
+  assert.equal(decodeURIComponent(r.headers.get('x-campaign')), 'Jarná akcia');
+  assert.equal(r.headers.get('x-badge'), '1');
+  // produkt nemá zľavu ani ceny: štítok vo farbe akcie sedí vľavo dole
+  const buf = Buffer.from(await r.arrayBuffer());
+  const px = [...(await sharp(buf).extract({ left: 22, top: 478, width: 1, height: 1 }).raw().toBuffer())];
+  assert.ok(Math.abs(px[0] - 0x0a) < 25 && Math.abs(px[1] - 0x4d) < 25 && Math.abs(px[2] - 0x8c) < 25, `farba štítku: ${px}`);
+  assert.equal((await api(`/projects/${proj.id}/preview-image`, { method: 'POST', body: { id: 'nie-je' } })).status, 404);
+  assert.deepEqual((await (await api('/projects/' + proj.id)).json()).config.products, {}); // náhľad nič neuložil
+});
+
 await t('slug sa po vytvorení nedá zmeniť', async () => {
   const r = await api('/projects/' + proj.id, { method: 'PUT', body: { ...proj, slug: 'iny-slug' } });
   assert.equal(r.status, 409);

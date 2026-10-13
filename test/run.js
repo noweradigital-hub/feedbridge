@@ -17,7 +17,7 @@ process.env.REMBG_RETRY_MS = '50';
 const { projects } = await import('../src/db.js');
 const { runProject } = await import('../src/feed/pipeline.js');
 const { parseFeed } = await import('../src/feed/parse.js');
-const { applyRules, renderTemplate, parsePrice, checkItem, testWhen } = await import('../src/feed/rules.js');
+const { applyRules, renderTemplate, parsePrice, checkItem, testWhen, fieldValue } = await import('../src/feed/rules.js');
 const { ensureImage, pruneImages, pruneCache, renderPreview, fetchCached } = await import('../src/images.js');
 const { safeFetch, isPublicAddress } = await import('../src/net.js');
 const { notifyRun } = await import('../src/notify.js');
@@ -545,6 +545,8 @@ await t('rembg: požiadavky idú po jednej, posiela sa model a po výpadku sa op
 
 console.log('Cenový badge');
 const { resolveBadge, renderBadge, contrast } = await import('../src/badge.js');
+const { normalizeCampaigns, normalizeOverrides, resolveCampaign, bratislavaDay, hasBoundary } = await import('../src/campaigns.js');
+const { resolvePricing } = await import('../src/feed/rules.js');
 const { layoutText } = await import('../src/text.js');
 const saleItem = { id: '1', price: '29,90 EUR', sale_price: '23.90 EUR' };
 await t('badge len pri zľave; ceny v slovenskom formáte; zľava a minimálna zľava', () => {
@@ -623,7 +625,7 @@ await t('pôvodná fotka + badge: obrázok vznikne len pre zľavnené, zmena cen
   assert.equal((await ensureImage('badge', `${base}/a.jpg`, saleItem, s, {})).file, one.file);
   const cheaper = await ensureImage('badge', `${base}/a.jpg`, { ...saleItem, sale_price: '19.90 EUR' }, s, {});
   assert.notEqual(cheaper.file, one.file);
-  assert.notEqual((await ensureImage('badge', `${base}/a.jpg`, saleItem, s, { primary: '#0a4d8c' })).file, one.file);
+  assert.notEqual((await ensureImage('badge', `${base}/a.jpg`, saleItem, s, { brand: { primary: '#0a4d8c' } })).file, one.file);
   const meta = await sharp(path.join(tmp, 'images', one.file)).metadata();
   assert.deepEqual([meta.width, meta.height, meta.format, meta.chromaSubsampling], [520, 520, 'jpeg', '4:4:4']);
   // fotka 800x600 na štvorci: biele pozadie fotky pokračuje aj v doplnených pásoch, badge je tmavý vľavo dole
@@ -653,6 +655,178 @@ await t('uložená konfigurácia spred badge ostáva pri výmene pozadia, nový 
   assert.equal(fresh.config.images.base, 'photo');
   assert.deepEqual(fresh.config.brand, { primary: '#14171c', accent: '#e11d48', font: 'inter' });
   projects.remove(fresh.id);
+});
+
+console.log('Akcie a šablóny');
+const camps = normalizeCampaigns(undefined);
+const BF = camps.find((c) => c.id === 'black-friday');
+const layoutCfg = { enabled: true, preset: 'layout-1' };
+const kidvakBrand = { primary: '#87af87', accent: '#b74018', font: 'inter' };
+await t('podmienka discount_pct počíta rovnako ako obrázok (platnosť zľavy, nadol)', () => {
+  assert.equal(fieldValue({ price: '100 EUR', sale_price: '90.49 EUR' }, 'discount_pct'), '9');
+  const future = `${new Date(Date.now() + 86_400_000).toISOString()}/${new Date(Date.now() + 2 * 86_400_000).toISOString()}`;
+  assert.equal(fieldValue({ price: '100 EUR', sale_price: '50 EUR', sale_price_effective_date: future }, 'discount_pct'), '0');
+  assert.equal(resolvePricing({ price: '34.90 EUR', sale_price: '29.90 EUR' }).pct, 14); // návrh má "-25%", skutočnosť je 14
+});
+await t('predvolené akcie, čistenie vstupu a zmazaná akcia v nastavení produktu', () => {
+  assert.deepEqual(camps.map((c) => [c.id, c.name, c.color]), [['black-friday', 'Black Friday', '#000000'], ['vianoce', 'Vianoce', '#a3162a'], ['vypredaj', 'Výpredaj', '#ff9000']]);
+  assert.deepEqual(normalizeCampaigns([]), []); // používateľ si ich môže zmazať všetky
+  const custom = normalizeCampaigns([{ name: '  Jarná akcia ', color: 'zle', from: '2026-03-01', to: 'nezmysel', layout: 'layout-9', when: [{ field: 'brand', op: 'eq', value: 'X' }, null] }, { name: '' }]);
+  assert.equal(custom.length, 1);
+  assert.deepEqual([custom[0].name, custom[0].color, custom[0].from, custom[0].to, custom[0].layout, custom[0].when.length], ['Jarná akcia', '#000000', '2026-03-01', '', '', 1]);
+  assert.match(custom[0].id, /^[a-z0-9]+$/);
+  const ov = normalizeOverrides({ a: { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' }, b: { campaign: 'zmazana' }, c: { campaign: 'none' }, d: {}, e: { layout: 'x' } }, camps);
+  assert.deepEqual(ov, { a: { campaign: 'black-friday', layout: 'layout-2', prices: 'hide' }, c: { campaign: 'none' } });
+});
+await t('akcia produktu: ručne, zo skupiny variantov, podmienkou, žiadna a mimo dátumu', () => {
+  const day = (n) => bratislavaDay(Date.now() + n * 86_400_000);
+  const cfg = {
+    campaigns: normalizeCampaigns([
+      { id: 'bf', name: 'Black Friday', color: '#000000', layout: 'layout-3' },
+      { id: 'sale', name: 'Výpredaj', color: '#ff9000', when: [{ field: 'discount_pct', op: 'gt', value: '0' }] },
+      { id: 'old', name: 'Skončená', color: '#333333', to: day(-1) },
+      { id: 'soon', name: 'Budúca', color: '#333333', from: day(1), when: [{ field: 'id', op: 'nempty' }] },
+    ]),
+    products: { 1: { campaign: 'bf' }, 2: { campaign: 'none' }, 3: { campaign: 'old' }, 5: { layout: 'layout-2', prices: 'hide' } },
+    groups: { G: { campaign: 'bf', layout: 'layout-1' } },
+  };
+  const sale = { price: '10 EUR', sale_price: '8 EUR' };
+  const r = (item, src) => { const p = resolveCampaign(item, src, cfg); return [p.campaign?.id || null, p.source, p.layout, p.hidePrices]; };
+  assert.deepEqual(r(sale, { id: '1' }), ['bf', 'manual', 'layout-3', false]); // ručne, layout z akcie
+  assert.deepEqual(r(sale, { id: '2' }), [null, 'manual', '', false]); // "žiadna" blokuje aj podmienky
+  assert.deepEqual(r(sale, { id: '3' }), [null, 'manual', '', false]); // ručne priradená akcia skončila: nič, nie iná akcia
+  assert.deepEqual(r(sale, { id: '4' }), ['sale', 'rule', '', false]); // podmienka
+  assert.deepEqual(r({ price: '10 EUR' }, { id: '4' }), [null, 'none', '', false]); // budúca akcia ešte neplatí
+  assert.deepEqual(r(sale, { id: '9', group: 'G' }), ['bf', 'manual', 'layout-1', false]); // variant dedí z celého produktu
+  assert.deepEqual(r(sale, { id: '5', group: 'G' }), ['bf', 'manual', 'layout-2', true]); // vlastné nastavenie variantu má prednosť
+  // výslovné predvoľby variantu prebíjajú nastavenie celého produktu
+  cfg.products['7'] = { campaign: 'auto', layout: 'default', prices: 'show' };
+  cfg.groups.H = { campaign: 'bf', layout: 'layout-1', prices: 'hide' };
+  assert.deepEqual(r(sale, { id: '7', group: 'H' }), ['sale', 'rule', '', false]);
+  assert.deepEqual(r(sale, { id: '8', group: 'H' }), ['bf', 'manual', 'layout-1', true]);
+  // ID, ktoré sa volá ako vlastnosť objektu, nesmie nič zdediť z prototypu
+  assert.deepEqual(r({ price: '10 EUR' }, { id: 'constructor', group: 'toString' }), [null, 'none', '', false]);
+  // podmienka akcie vidí zľavu tak ako obrázok: vlastné pole referenčnej ceny a čas behu
+  const refCfg = { campaigns: normalizeCampaigns([{ id: 'big', name: 'Veľká zľava', when: [{ field: 'discount_pct', op: 'gte', value: '15' }] }]), products: {}, groups: {}, images: { badge: { referenceField: 'lowest_30d' } } };
+  const refItem = { price: '100 EUR', sale_price: '80 EUR', lowest_30d: '90 EUR' }; // voči 90 je to 11 %, nie 20 %
+  assert.equal(resolveCampaign(refItem, { id: 'x' }, refCfg).campaign, null);
+  assert.equal(resolveCampaign(refItem, { id: 'x' }, { ...refCfg, images: { badge: {} } }).campaign.id, 'big');
+  const until = Date.now() + 3_600_000;
+  const timed = { price: '100 EUR', sale_price: '80 EUR', sale_price_effective_date: `${new Date(until - 7_200_000).toISOString()}/${new Date(until).toISOString()}` };
+  assert.equal(resolveCampaign(timed, { id: 'x' }, { ...refCfg, images: { badge: {} } }, until - 1000).campaign.id, 'big');
+  assert.equal(resolveCampaign(timed, { id: 'x' }, { ...refCfg, images: { badge: {} } }, until + 1000).campaign, null);
+  assert.deepEqual(normalizeOverrides(JSON.parse('{"__proto__":{"campaign":"none"},"constructor":{"campaign":"none"},"ok":{"campaign":"none"}}'), camps), { ok: { campaign: 'none' } });
+  assert.equal(hasBoundary(cfg.campaigns, day(-2), day(0)), true); // "Skončená" skončila včera
+  assert.equal(hasBoundary(cfg.campaigns, day(0), day(0)), false);
+  assert.equal(hasBoundary(cfg.campaigns, day(0), day(1)), true); // "Budúca" začína zajtra
+  assert.match(bratislavaDay(Date.parse('2026-11-27T23:30:00Z')), /^2026-11-28$/); // v Bratislave je už ďalší deň
+});
+await t('layouty: cena, zľava a akcia sa rozhodujú nezávisle', () => {
+  const sale = { price: '34.90 EUR', sale_price: '29.90 EUR' };
+  const full = resolveBadge(sale, layoutCfg, kidvakBrand, Date.now(), { campaign: BF });
+  assert.deepEqual([full.preset, full.now.number, full.old.number, full.pill, full.campaign.name, full.campaign.bg, full.campaign.fg], ['layout-1', '29,90', '34,90', '-14%', 'Black Friday', '#000000', '#f1f1f1']);
+  // biely text na svetlozelenej: farba textu ostáva, podklad sa mierne stmaví a je o tom poznámka
+  assert.equal(full.price.fg, '#ffffff');
+  assert.notEqual(full.price.bg, '#87af87');
+  assert.ok(contrast(full.price.fg, full.price.bg) >= 3);
+  assert.equal(full.notes.length, 1);
+  // produkt v akcii bez zľavy: len štítok
+  const tagOnly = resolveBadge({ price: '34.90 EUR' }, layoutCfg, kidvakBrand, Date.now(), { campaign: BF });
+  assert.deepEqual([tagOnly.now, tagOnly.old, tagOnly.pill, tagOnly.campaign.name], [null, null, null, 'Black Friday']);
+  // skryté ceny (4. rám návrhu): štítok a zľava bez cien
+  const hidden = resolveBadge(sale, layoutCfg, kidvakBrand, Date.now(), { campaign: BF, hidePrices: true });
+  assert.deepEqual([hidden.now, hidden.old, hidden.pill, !!hidden.campaign], [null, null, '-14%', true]);
+  // zľava bez akcie: ceny a zľava, žiadny štítok
+  const noCamp = resolveBadge(sale, layoutCfg, kidvakBrand);
+  assert.deepEqual([noCamp.now.number, noCamp.pill, noCamp.campaign], ['29,90', '-14%', null]);
+  // nič na kreslenie
+  assert.equal(resolveBadge({ price: '34.90 EUR' }, layoutCfg, kidvakBrand), null);
+  // prepis layoutu z produktu a vypnuté prvky
+  assert.equal(resolveBadge(sale, layoutCfg, kidvakBrand, Date.now(), { layout: 'layout-3' }).preset, 'layout-3');
+  const off = resolveBadge(sale, { ...layoutCfg, elements: { discount: { show: false }, old: { show: false }, campaign: { show: false } } }, kidvakBrand, Date.now(), { campaign: BF });
+  assert.deepEqual([off.pill, off.old, off.campaign, off.now.number], [null, null, null, '29,90']);
+  // svetlá farba akcie: tmavý text; sýta oranžová z návrhu: svetlý text ostáva
+  assert.equal(resolveBadge(sale, layoutCfg, kidvakBrand, Date.now(), { campaign: { name: 'X', color: '#fff3b0' } }).campaign.fg, '#14171c');
+  assert.equal(resolveBadge(sale, layoutCfg, kidvakBrand, Date.now(), { campaign: { name: 'X', color: '#ff9000' } }).campaign.fg, '#f1f1f1');
+  // prázdne pole ceny v nastavení = predvolené vrátane kontroly platnosti: skončená zľava sa nepoužije
+  const ended = { price: '100 EUR', sale_price: '50 EUR', sale_price_effective_date: '2020-01-01T00:00+01:00/2020-01-02T00:00+01:00' };
+  assert.equal(resolveBadge(ended, { ...layoutCfg, priceField: '' }, kidvakBrand), null);
+  // "bez cien" platí aj pre pôvodné presety: sú čisto cenové, takže sa nekreslia
+  assert.equal(resolveBadge(sale, { enabled: true, preset: 'card' }, kidvakBrand, Date.now(), { hidePrices: true }), null);
+  assert.equal(resolveBadge(sale, { enabled: true, preset: 'strip' }, kidvakBrand, Date.now(), { hidePrices: true }), null);
+  // pôvodné presety berú názov akcie ako štítok
+  assert.equal(resolveBadge(sale, { enabled: true, preset: 'strip' }, kidvakBrand, Date.now(), { campaign: BF }).label, 'Black Friday');
+});
+await t('layouty sa vykreslia na správne miesta (štvorec aj 7:8) a dlhý názov nepretečie', async () => {
+  const sale = { price: '34.90 EUR', sale_price: '29.90 EUR' };
+  const cfgEl = { ...layoutCfg, elements: { price: { bg: '#00aa00', text: 'white' }, old: { bg: '#0000aa', text: 'white' } } };
+  const px = async (svg, w, x, y) => [...(await sharp(svg).ensureAlpha().extract({ left: Math.round(x * w / 1400), top: Math.round(y * w / 1400), width: 1, height: 1 }).raw().toBuffer())];
+  const is = (c, r, g, b) => c[3] > 200 && Math.abs(c[0] - r) < 30 && Math.abs(c[1] - g) < 30 && Math.abs(c[2] - b) < 30;
+  for (const [W, H] of [[1400, 1600], [1080, 1080]]) {
+    const Hd = H * 1400 / W; // výška v jednotkách návrhu
+    const l1 = renderBadge(resolveBadge(sale, cfgEl, kidvakBrand, Date.now(), { campaign: { name: 'Black Friday', color: '#101010' } }), W, H);
+    assert.ok(is(await px(l1, W, 60, 70), 16, 16, 16), 'L1: štítok akcie vľavo hore');
+    assert.ok(is(await px(l1, W, 1320, 70), 240, 54, 54), 'L1: zľava vpravo hore');
+    assert.ok(is(await px(l1, W, 56, Hd - 70), 0, 170, 0), 'L1: nová cena vľavo dole');
+    assert.ok(is(await px(l1, W, 56, Hd - 59 - 174 - 22 - 15), 0, 0, 170), 'L1: pôvodná cena nad novou');
+    assert.equal((await px(l1, W, 700, Hd / 2))[3], 0, 'stred obrázka ostáva voľný');
+    const l2 = renderBadge(resolveBadge(sale, { ...cfgEl, preset: 'layout-2' }, kidvakBrand, Date.now(), { campaign: { name: 'Black Friday', color: '#101010' } }), W, H);
+    assert.ok(is(await px(l2, W, 1340, Hd - 70), 0, 170, 0), 'L2: nová cena vpravo dole');
+    assert.ok(is(await px(l2, W, 20, Hd - 3), 16, 16, 16), 'L2: prechod má dole farbu akcie');
+    assert.ok((await px(l2, W, 20, Hd - 340))[3] < 40, 'L2: prechod sa hore stráca');
+    const l3 = renderBadge(resolveBadge(sale, { ...cfgEl, preset: 'layout-3' }, kidvakBrand, Date.now(), { campaign: { name: 'Black Friday', color: '#0d2e50' } }), W, H);
+    assert.ok(is(await px(l3, W, 300, Hd - 36), 13, 46, 80), 'L3: panel vo farbe akcie');
+    assert.equal((await px(l3, W, 8, Hd - 100))[3], 0, 'L3: panel je odsadený od okraja');
+    // 4. rám: bez cien sadne štítok vľavo dole
+    const f4 = renderBadge(resolveBadge(sale, cfgEl, kidvakBrand, Date.now(), { campaign: { name: 'Výpredaj', color: '#ff9000' }, hidePrices: true }), W, H);
+    assert.ok(is(await px(f4, W, 60, Hd - 60), 255, 144, 0), 'bez cien: štítok vľavo dole');
+    assert.equal((await px(f4, W, 60, 70))[3], 0, 'bez cien: vľavo hore nič');
+  }
+  // dlhý názov akcie a dlhá cena: názov sa zmenší a skráti, do ceny ani do zľavy nezasiahne
+  const longSpec = (preset) => resolveBadge({ price: '129990.00 CZK', sale_price: '99990.00 CZK' }, { ...layoutCfg, preset, scale: 1.3, elements: { price: { bg: '#00aa00', text: '#00aa00' }, old: { bg: '#00aa00', text: '#00aa00' }, discount: { bg: '#aa0000', text: '#aa0000' } } }, kidvakBrand, Date.now(), { campaign: { name: 'Veľký vianočný výpredaj skladových zásob', color: '#101010', textColor: '#0000ff' } });
+  const blueInside = async (svg, x0, y0, x1, y1) => {
+    const { data, info } = await sharp(svg).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    let n = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * info.width + x) * 4; if (data[i + 3] > 200 && data[i + 2] > 200 && data[i] < 60 && data[i + 1] < 60) n++; }
+    return n;
+  };
+  const W = 700;
+  const l2 = renderBadge(longSpec('layout-2'), W, W);
+  assert.ok(await blueInside(l2, 0, 0, W, W) > 50, 'L2: názov akcie sa nakreslil');
+  assert.equal(await blueInside(l2, 340, 0, W, W), 0, 'L2: názov akcie nezasahuje do cien vpravo');
+  const l1 = renderBadge(longSpec('layout-1'), W, W);
+  assert.ok(await blueInside(l1, 0, 0, W, 120) > 50, 'L1: štítok s názvom sa nakreslil');
+  assert.equal(await blueInside(l1, W - 190, 0, W, 120), 0, 'L1: štítok nezasahuje do zľavy vpravo hore');
+});
+await t('pomer strán plátna: štvorec, 4:5 a 7:8', async () => {
+  const s = { ...imgCfg, base: 'photo', applyToAll: true, badge: { enabled: false } };
+  const dims = async (ratio) => { const r = await ensureImage('ratio', `${base}/a.jpg`, {}, { ...s, ratio }); const m = await sharp(path.join(tmp, 'images', r.file)).metadata(); return [m.width, m.height]; };
+  assert.deepEqual(await dims('1:1'), [520, 520]);
+  assert.deepEqual(await dims('4:5'), [520, 650]);
+  assert.deepEqual(await dims('7:8'), [520, 594]);
+});
+await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil ostáva bez grafiky', async () => {
+  const proj = projects.create({ name: 'Akcie', slug: 'akcie-test', source_url: `${base}/feed.xml`, config: {
+    images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },
+    products: { '003': { campaign: 'vypredaj' } }, // 003 nemá zľavu: dostane len štítok
+    profiles: [{ slug: 'akcie-test', name: 'Meta promo', channel: 'meta' }, { slug: 'akcie-test-clean', name: 'Meta čistý', channel: 'meta', imageMode: 'clean' }],
+  } });
+  const s = await runProject(proj, () => {});
+  assert.equal(s.error, undefined, JSON.stringify(s));
+  const promo = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'akcie-test.xml'), 'utf8')).items;
+  const clean = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'akcie-test-clean.xml'), 'utf8')).items;
+  const byId = (list, id) => list.find((i) => i.id === id);
+  assert.match(byId(promo, '001').image_link, /\/img\/akcie-test\//); // zľavnený: ceny a zľava
+  assert.match(byId(promo, '003').image_link, /\/img\/akcie-test\//); // v akcii bez zľavy: štítok
+  assert.ok(byId(promo, '002').image_link.startsWith(base)); // bez zľavy a bez akcie: pôvodná fotka
+  assert.deepEqual(s.profiles['akcie-test'].campaigns, { vypredaj: 1 });
+  assert.ok(clean.every((i) => i.image_link.startsWith(base)), 'čistý profil nemá grafiku');
+  // štítok má farbu akcie (oranžová) vľavo dole, keďže produkt nemá ceny
+  const file = path.join(tmp, 'images', byId(promo, '003').image_link.split('/img/')[1]);
+  const c = [...(await sharp(file).extract({ left: 22, top: 498, width: 1, height: 1 }).raw().toBuffer())];
+  assert.ok(c[0] > 220 && c[1] > 110 && c[1] < 180 && c[2] < 60, `farba štítku: ${c}`);
+  projects.remove(proj.id);
+  for (const f of ['akcie-test', 'akcie-test-clean']) fs.rmSync(path.join(tmp, 'feeds', `${f}.xml`), { force: true });
 });
 
 console.log('Upozornenia');

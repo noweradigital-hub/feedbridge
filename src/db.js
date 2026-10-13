@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import { config, defaultProjectConfig } from './config.js';
-import { normalizeBrand } from './badge.js';
+import { normalizeBrand, normalizeElements, PRESETS } from './badge.js';
+import { normalizeCampaigns, normalizeOverrides } from './campaigns.js';
 
 const db = new DatabaseSync(config.dbFile);
 db.exec(`
@@ -37,6 +38,11 @@ CREATE TABLE IF NOT EXISTS config_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_versions_project ON config_versions(project_id, id DESC);
 `);
+// Počítadlo uložení: klient posiela číslo, s ktorým projekt načítal, a server odmietne
+// uloženie nad starším stavom (dve otvorené okná by si inak potichu prepísali zmeny).
+if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'rev')) {
+  db.exec('ALTER TABLE projects ADD COLUMN rev INTEGER NOT NULL DEFAULT 0');
+}
 
 /**
  * Beh prerušený reštartom/pádom procesu by ostal navždy "running".
@@ -78,7 +84,7 @@ export function normalizeProfiles(list, projectSlug) {
     name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
     channel: p.channel === 'google' ? 'google' : 'meta',
     enabled: p.enabled !== false,
-    imageMode: p.imageMode === 'original' ? 'original' : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
+    imageMode: ['original', 'clean'].includes(p.imageMode) ? p.imageMode : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
     rules: Array.isArray(p.rules) ? p.rules : [],
   }));
   if (!out.length && projectSlug) {
@@ -90,9 +96,14 @@ export function normalizeProfiles(list, projectSlug) {
 export function normalizeConfig(cfg, projectSlug) {
   const base = defaultProjectConfig();
   const c = cfg || {};
+  const campaigns = normalizeCampaigns(c.campaigns);
+  const badge = { ...base.images.badge, ...((c.images || {}).badge || {}) };
   return {
     profiles: normalizeProfiles(c.profiles, projectSlug),
     brand: normalizeBrand(c.brand),
+    campaigns,
+    products: normalizeOverrides(c.products, campaigns),
+    groups: normalizeOverrides(c.groups, campaigns),
     rules: Array.isArray(c.rules) ? c.rules : base.rules,
     images: {
       ...base.images,
@@ -101,7 +112,13 @@ export function normalizeConfig(cfg, projectSlug) {
       // vtedy obrázky znamenali výmenu pozadia a tak to aj ostane. Všetko ostatné je pôvodná fotka.
       base: c.images?.base === 'photo' || c.images?.base === 'background' ? c.images.base
         : c.images && !('badge' in c.images) && ('provider' in c.images || 'background' in c.images) ? 'background' : 'photo',
-      badge: { ...base.images.badge, ...((c.images || {}).badge || {}), when: Array.isArray(c.images?.badge?.when) ? c.images.badge.when : [] },
+      ratio: ['1:1', '4:5', '7:8'].includes(c.images?.ratio) ? c.images.ratio : '1:1',
+      badge: {
+        ...badge,
+        preset: PRESETS.includes(badge.preset) ? badge.preset : 'card',
+        elements: normalizeElements(badge.elements),
+        when: Array.isArray(badge.when) ? badge.when : [],
+      },
       background: { ...base.images.background, ...((c.images || {}).background || {}) },
       backgrounds: Array.isArray((c.images || {}).backgrounds) ? c.images.backgrounds : [],
     },
@@ -134,7 +151,7 @@ export const projects = {
   update(id, { name, slug, source_url, interval_minutes, enabled, config: cfg }) {
     versions.record(id); // projekt z čias pred históriou: odlož aj stav pred prvou úpravou
     db.prepare(
-      'UPDATE projects SET name=?, slug=?, source_url=?, interval_minutes=?, enabled=?, config=? WHERE id=?'
+      'UPDATE projects SET name=?, slug=?, source_url=?, interval_minutes=?, enabled=?, config=?, rev=rev+1 WHERE id=?'
     ).run(name, slug, source_url, interval_minutes, enabled ? 1 : 0, JSON.stringify(normalizeConfig(cfg, slug)), id);
     versions.record(id);
     return this.get(id);

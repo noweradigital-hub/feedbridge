@@ -6,6 +6,7 @@ import { applyRules, checkItem, fieldValue, channelOf, CHANNELS } from './rules.
 import { buildFeedXml } from './xml.js';
 import { ensureImage, pruneImages, mapLimit } from '../images.js';
 import { safeFetch } from '../net.js';
+import { resolveCampaign } from '../campaigns.js';
 
 export async function fetchSource(url) {
   if (!/^https?:\/\//i.test(url || '')) throw new Error('Zdrojový feed musí byť http(s) URL');
@@ -25,8 +26,12 @@ export function activeProfiles(project) {
 
 /** Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka. */
 export function imageModeOf(profile) {
-  return channelOf(profile.channel) === 'google' ? 'original' : profile.imageMode === 'original' ? 'original' : 'project';
+  if (channelOf(profile.channel) === 'google') return 'original';
+  return ['original', 'clean'].includes(profile.imageMode) ? profile.imageMode : 'project'; // clean = upravený formát bez cien a akcií
 }
+
+/** Zdrojové ID a skupina variantov položky: na ne sú naviazané nastavenia produktov (pravidlá môžu id prepísať). */
+const sourceOf = (original) => ({ id: fieldValue(original, 'id').trim(), group: fieldValue(original, 'item_group_id').trim() });
 
 const rulesFor = (project, profile) => [...(project.config.rules || []), ...(profile.rules || [])];
 
@@ -110,28 +115,34 @@ async function publishedImages(file) {
 }
 
 /** Jeden profil: pravidlá projektu + profilu, poistka, obrázky, validácia pre kanál, atomický zápis. */
-async function runProfile(project, profile, items, channel, ps, used, log, forced) {
+async function runProfile(project, profile, items, channel, ps, used, log, forced, at) {
   const cfg = project.config;
   const file = path.join(config.feedsDir, `${profile.slug}.xml`);
   const rules = rulesFor(project, profile);
   const processed = [];
+  const sources = new Map(); // položka po pravidlách -> zdrojové ID a skupina
   for (const original of items) {
     const { item, excluded } = applyRules(original, rules, profile.channel);
     if (excluded) { ps.excluded++; continue; }
     processed.push(item);
+    sources.set(item, sourceOf(original));
   }
   log(`Po pravidlách: ${processed.length} položiek (vylúčených ${ps.excluded})`);
   if (forced) log('Poistka poklesu vypnutá (spustené s potvrdením)');
   else await checkDropGuard(distinctIds(processed), file, cfg.safety, log); // pred obrázkami, nech sa neplatí výrez zbytočne
 
   const img = cfg.images;
-  if (img.enabled && imageModeOf(profile) === 'project') {
-    log(`Spracúvam obrázky (provider: ${img.provider}, súbežne ${config.imageConcurrency})`);
+  const mode = imageModeOf(profile);
+  if (img.enabled && mode !== 'original') {
+    log(`Spracúvam obrázky (${mode === 'clean' ? 'bez cien a akcií' : 's cenami a akciami'}, súbežne ${config.imageConcurrency})`);
     await mapLimit(processed, config.imageConcurrency, async (item) => {
       const url = fieldValue(item, 'image_link');
       if (!url) { ps.images.skipped++; return; }
       try {
-        const { file: out, cached } = await ensureImage(project.slug, url, item, img, cfg.brand);
+        const plan = mode === 'clean' ? null : resolveCampaign(item, sources.get(item), cfg, at);
+        if (plan?.campaign) ps.campaigns[plan.campaign.id] = (ps.campaigns[plan.campaign.id] || 0) + 1;
+        const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout, hidePrices: plan?.hidePrices };
+        const { file: out, cached } = await ensureImage(project.slug, url, item, img, ctx);
         if (!out) { ps.images.skipped++; return; } // bez badge ostáva pôvodná fotka
         used.add(out);
         if (cached) ps.images.cached++; else ps.images.generated++;
@@ -188,12 +199,14 @@ export async function runProject(project, log = () => {}, { force = false } = {}
 
   const used = new Set();
   const many = profiles.length > 1;
+  const at = Date.now(); // jeden okamih pre celý beh: platnosť zliav a akcií sa v strede behu nezmení
+  summary.at = at; // podľa neho plánovač zistí, či medzitým začala alebo skončila akcia
   for (const profile of profiles) {
-    const ps = { name: profile.name, channel: channelOf(profile.channel), excluded: 0, written: 0, invalid: 0, notes: 0, images: emptyImages(), warnings: [] };
+    const ps = { name: profile.name, channel: channelOf(profile.channel), excluded: 0, written: 0, invalid: 0, notes: 0, images: emptyImages(), campaigns: {}, warnings: [] };
     summary.profiles[profile.slug] = ps;
     const plog = many ? (m) => log(`[${profile.slug}] ${m}`) : log;
     try {
-      await runProfile(project, profile, items, channel, ps, used, plog, isForced(profile.slug));
+      await runProfile(project, profile, items, channel, ps, used, plog, isForced(profile.slug), at);
     } catch (e) {
       ps.error = e.message;
       if (e.guard) ps.guard = true;

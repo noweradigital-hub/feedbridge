@@ -49,10 +49,14 @@ export function defaultProjectConfig() {
     profiles: [], // doplní normalizeProfiles: aspoň jeden profil so slugom projektu
     rules: [],
     brand: { primary: '#14171c', accent: '#e11d48', font: 'inter' }, // farby a písmo značky pre badge
+    campaigns: undefined, // doplní normalizeCampaigns: Black Friday, Vianoce, Výpredaj
+    products: {}, // nastavenia jednotlivých produktov podľa zdrojového ID
+    groups: {}, // to isté pre celé skupiny variantov (item_group_id), platí aj pre budúce varianty
     images: {
       enabled: false,
       base: 'photo', // photo = pôvodná fotka | background = výmena pozadia (nastavenia nižšie)
-      fit: 'contain', // contain = celá fotka na štvorci | cover = orez na stred
+      ratio: '1:1', // pomer strán plátna: 1:1 (bezpečný pre dlaždice Mety) | 4:5 | 7:8
+      fit: 'contain', // contain = celá fotka na plátne | cover = orez na stred
       fill: 'auto', // farba voľného miesta pri contain: auto alebo #rrggbb
       applyToAll: false, // aj produkty bez badge dostanú jednotný štvorcový formát
       badge: { ...BADGE_DEFAULTS },

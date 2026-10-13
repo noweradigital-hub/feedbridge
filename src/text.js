@@ -15,18 +15,39 @@ export const FONTS = {
 };
 export const fontOf = (name) => (FONTS[name] ? name : 'inter');
 
+const WEIGHTS = [400, 600, 700, 800];
+const nearestWeight = (w) => WEIGHTS.reduce((best, x) => (Math.abs(x - w) < Math.abs(best - w) ? x : best), 800);
+
 const cache = new Map();
 /** Rez písma = základná latinka + rozšírená (diakritika, Kč, zł); znak sa hľadá postupne v oboch. */
 function face(family, weight) {
-  const key = `${fontOf(family)}-${weight >= 700 ? 800 : 600}`;
+  const w = nearestWeight(Number(weight) || 800);
+  const key = `${fontOf(family)}-${w}`;
   if (!cache.has(key)) {
-    const [name, w] = [FONTS[fontOf(family)].file, weight >= 700 ? 800 : 600];
+    const name = FONTS[fontOf(family)].file;
     cache.set(key, ['latin', 'latin-ext'].map((sub) => {
       const b = fs.readFileSync(path.join(DIR, `${name}-${sub}-${w}-normal.woff`));
       return opentype.parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
     }));
   }
   return cache.get(key);
+}
+
+/**
+ * Riadkové miery ako v CSS (line-height: normal) pre danú veľkosť písma: výška riadka,
+ * poloha účiaria od horného okraja a poloha a hrúbka prečiarknutia. Vďaka tomu sedia
+ * rozmery boxov s návrhom vo Figme, kde je text zadaný veľkosťou písma.
+ */
+export function lineMetrics(family, weight, size) {
+  const f = face(family, weight)[0];
+  const k = size / f.unitsPerEm;
+  const os2 = f.tables.os2 || {};
+  return {
+    lineHeight: (f.ascender - f.descender) * k,
+    baseline: f.ascender * k,
+    strikeY: (os2.yStrikeoutPosition || f.unitsPerEm * 0.29) * k,
+    strikeSize: (os2.yStrikeoutSize || f.unitsPerEm * 0.07) * k,
+  };
 }
 
 /**

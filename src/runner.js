@@ -2,6 +2,7 @@ import { projects, runs } from './db.js';
 import { runProject } from './feed/pipeline.js';
 import { notifyRun } from './notify.js';
 import { pruneCache } from './images.js';
+import { hasBoundary, bratislavaDay } from './campaigns.js';
 
 const running = new Set();
 
@@ -44,7 +45,11 @@ export function startScheduler() {
     for (const p of projects.list()) {
       if (!p.enabled || !p.source_url || running.has(p.id)) continue;
       const last = p.last_run_at ? Date.parse(p.last_run_at.replace(' ', 'T') + 'Z') : 0;
-      const due = Date.now() - last >= p.interval_minutes * 60_000;
+      // akcia, ktorá dnes začala alebo včera skončila, sa má prejaviť hneď po polnoci, nie až pri ďalšom intervale
+      // rozhoduje okamih, ku ktorému beh akcie vyhodnotil, nie čas jeho dokončenia (beh cez polnoc)
+      const evaluated = Number(p.last_summary?.at) || last;
+      const boundary = last > 0 && hasBoundary(p.config.campaigns, bratislavaDay(evaluated), bratislavaDay());
+      const due = boundary || Date.now() - last >= p.interval_minutes * 60_000;
       if (due) triggerRun(p.id).catch((e) => console.error('scheduler:', e.message));
     }
   };
