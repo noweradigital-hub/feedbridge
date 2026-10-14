@@ -113,6 +113,8 @@ export function normalizeConfig(cfg, projectSlug) {
       base: c.images?.base === 'photo' || c.images?.base === 'background' ? c.images.base
         : c.images && !('badge' in c.images) && ('provider' in c.images || 'background' in c.images) ? 'background' : 'photo',
       ratio: ['1:1', '4:5', '7:8'].includes(c.images?.ratio) ? c.images.ratio : '1:1',
+      margin: Math.min(0.3, Math.max(0, Number(c.images?.margin) || 0)),
+      trim: c.images?.trim === true,
       badge: {
         ...badge,
         preset: PRESETS.includes(badge.preset) ? badge.preset : 'card',

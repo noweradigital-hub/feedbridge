@@ -57,7 +57,9 @@ export function defaultProjectConfig() {
       base: 'photo', // photo = pôvodná fotka | background = výmena pozadia (nastavenia nižšie)
       ratio: '1:1', // pomer strán plátna: 1:1 (bezpečný pre dlaždice Mety) | 4:5 | 7:8
       fit: 'contain', // contain = celá fotka na plátne | cover = orez na stred
-      fill: 'auto', // farba voľného miesta pri contain: auto alebo #rrggbb
+      fill: 'auto', // farba voľného miesta pri contain: auto alebo #rrggbb (aj podklad priehľadných PNG)
+      margin: 0, // okraj okolo fotky pri contain, podiel šírky plátna na každej strane (0 – 0.3)
+      trim: false, // pred umiestnením orezať jednofarebné/priehľadné okraje fotky (produkty majú rovnaký okraj)
       applyToAll: false, // aj produkty bez badge dostanú jednotný štvorcový formát
       badge: { ...BADGE_DEFAULTS },
       provider: 'whitekey', // whitekey | rembg | magnific | removebg | none

@@ -428,6 +428,19 @@ async function composePhoto(photoBuf, bg, s, overlay = []) {
 }
 
 /**
+ * Oreže jednofarebné (aj priehľadné) okraje, aby mali všetky produkty rovnaký okraj nastavený v `margin`.
+ * Pri lifestyle fotke sa nič neoreže (rohy nemajú farbu pozadia); orez na zlomok fotky sa ignoruje.
+ */
+async function trimmed(photoBuf, under) {
+  try {
+    const { data, info } = await untrusted(photoBuf).rotate().flatten({ background: under }).trim({ threshold: 12 }).png().toBuffer({ resolveWithObject: true });
+    const m = await untrusted(photoBuf).metadata();
+    const [w, h] = (m.orientation || 1) >= 5 ? [m.height, m.width] : [m.width, m.height];
+    return info.width * info.height >= 0.04 * w * h ? data : photoBuf;
+  } catch { return photoBuf; } // jednofarebný obrázok: sharp nemá čo nechať
+}
+
+/**
  * Pôvodná fotka na štvorcovom plátne bez zásahu do pozadia (základ pre cenový badge).
  * fit=contain: celá fotka; voľné miesto vyplní farba okraja fotky (štúdiové pozadie tak plynule
  * pokračuje), pri lifestyle fotke jej rozmazaná kópia s mäkkým prechodom. fit=cover: orez na stred.
@@ -437,15 +450,20 @@ async function composePhoto(photoBuf, bg, s, overlay = []) {
 async function originalCanvas(photoBuf, s, reserve = { top: 0, bottom: 0 }) {
   const { w: size, h: height } = canvasOf(s);
   const areaH = height - reserve.top - reserve.bottom;
-  const flat = () => untrusted(photoBuf).rotate().flatten({ background: '#ffffff' });
   const cover = s.fit === 'cover';
-  let fg = await flat().resize(size, areaH, { fit: cover ? 'cover' : 'inside' }).png().toBuffer();
+  // priehľadné PNG dostanú podklad vo farbe doplneného miesta (inak biely), nie čierny
+  const under = isHex(s.fill) ? s.fill : '#ffffff';
+  const source = photoBuf; // farba okraja pri fill=auto sa meria na neorezanej fotke
+  if (!cover && s.trim) photoBuf = await trimmed(photoBuf, under);
+  const flat = () => untrusted(photoBuf).rotate().flatten({ background: under });
+  const margin = cover ? 0 : Math.round(size * Math.min(0.3, Math.max(0, Number(s.margin) || 0)));
+  let fg = await flat().resize(size - 2 * margin, areaH - 2 * margin, { fit: cover ? 'cover' : 'inside' }).png().toBuffer();
   const fm = await sharp(fg).metadata();
   const left = Math.round((size - fm.width) / 2);
   const top = reserve.top + Math.round((areaH - fm.height) / 2);
   if (fm.width === size && fm.height === height) return fg;
   let bg;
-  const st = isHex(s.fill) ? null : await borderStats(photoBuf);
+  const st = isHex(s.fill) ? null : await borderStats(source);
   if (isHex(s.fill) || st.uniform >= 0.8) {
     const background = isHex(s.fill) ? s.fill : { r: st.median[0], g: st.median[1], b: st.median[2] };
     bg = await sharp({ create: { width: size, height, channels: 3, background } }).png().toBuffer();
@@ -538,6 +556,8 @@ export async function ensureImage(slug, url, item, s, ctx = {}) {
   } : {
     src: orig.hash, base: 'photo', size: s.size, fit: s.fit === 'cover' ? 'cover' : 'contain', fill: isHex(s.fill) ? s.fill : 'auto', quality: s.quality,
     ...(RATIOS[s.ratio] && s.ratio !== '1:1' ? { ratio: s.ratio } : {}), // štvorec má kľúč ako doteraz
+    ...(s.fit !== 'cover' && Number(s.margin) > 0 ? { margin: Number(s.margin) } : {}),
+    ...(s.fit !== 'cover' && s.trim ? { trim: true } : {}),
   };
   if (badge) { const { notes: _n, ...look } = badge; key.badge = look; }
   const name = sha1(JSON.stringify(key)).slice(0, 24) + '.jpg';

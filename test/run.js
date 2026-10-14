@@ -35,6 +35,8 @@ const images = { 'a.jpg': await productJpg('#c0392b'), 'b.jpg': await productJpg
 images['swap.jpg'] = images['a.jpg'];
 images['flaky.jpg'] = images['c.jpg'];
 // "lifestyle" fotka: farebné pozadie až po okraj, výrez by nedával zmysel
+// priehľadné PNG s veľkým prázdnym okrajom: červený štvorec 200×200 v strede plátna 400×300
+images['tight.png'] = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect x="100" y="50" width="200" height="200" fill="#ff0000"/></svg>')).png().toBuffer();
 images['life.jpg'] = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="#8a6d4b"/><rect x="200" y="150" width="400" height="300" fill="#d9c7a3"/></svg>')).jpeg().toBuffer();
 
 const feedXml = (base) => `<?xml version="1.0" encoding="UTF-8"?>
@@ -804,6 +806,18 @@ await t('pomer strán plátna: štvorec, 4:5 a 7:8', async () => {
   assert.deepEqual(await dims('1:1'), [520, 520]);
   assert.deepEqual(await dims('4:5'), [520, 650]);
   assert.deepEqual(await dims('7:8'), [520, 594]);
+});
+await t('priehľadné PNG: biely podklad, orez prázdnych okrajov a jednotný okraj', async () => {
+  const s = { ...imgCfg, base: 'photo', fit: 'contain', fill: 'auto', applyToAll: true, badge: { enabled: false } };
+  const px = async (file, x, y) => [...(await sharp(path.join(tmp, 'images', file)).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer())];
+  const plain = await ensureImage('trim', `${base}/tight.png`, {}, s);
+  assert.ok((await px(plain.file, 5, 5)).every((v) => v > 245), 'priehľadné miesto je biele');
+  const r = await ensureImage('trim', `${base}/tight.png`, {}, { ...s, trim: true, margin: 0.1 });
+  assert.notEqual(r.file, plain.file, 'okraj a orez sú v kľúči obrázka');
+  const red = (c) => c[0] > 220 && c[1] < 40 && c[2] < 40;
+  assert.ok((await px(r.file, 40, 260)).every((v) => v > 245), 'okraj 10 % ostal biely');
+  assert.ok(red(await px(r.file, 62, 260)) && red(await px(r.file, 260, 62)), 'produkt vyplní plátno až po okraj');
+  assert.ok(red(await px(r.file, 457, 457)) && (await px(r.file, 480, 480)).every((v) => v > 245), 'okraj je rovnaký aj vpravo dole');
 });
 await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil ostáva bez grafiky', async () => {
   const proj = projects.create({ name: 'Akcie', slug: 'akcie-test', source_url: `${base}/feed.xml`, config: {
