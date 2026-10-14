@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { projects, runs, versions, validSlug, normalizeProfiles, normalizeConfig } from './db.js';
 import { triggerRun, isRunning, startScheduler } from './runner.js';
-import { previewProject } from './feed/pipeline.js';
+import { previewProject, imageModeOf } from './feed/pipeline.js';
 import { parseFeed } from './feed/parse.js';
 import { fetchSource } from './feed/pipeline.js';
 import { renderPreview, validAssetName, originalJpeg, imagePlan } from './images.js';
@@ -298,8 +298,10 @@ app.post('/api/projects/:id/preview-image', wrap(async (req, res) => {
   const src = sourceOf(items[idx]);
   if (body.override && typeof body.override === 'object') cfg.products = normalizeConfig({ ...cfg, products: { ...cfg.products, [src.id]: body.override } }, p.slug).products;
   const at = Date.now();
+  // voliteľne podľa režimu obrázkov profilu (čistý = bez grafiky, percent = bez cien)
+  const mode = body.profile ? imageModeOf(cfg.profiles.find((x) => x.slug === body.profile) || {}) : 'project';
   const plan = resolveCampaign(item, src, cfg, at);
-  const ctx = { brand: cfg.brand, at, campaign: plan.campaign, layout: plan.layout, hidePrices: plan.hidePrices };
+  const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean' && mode !== 'original', campaign: plan.campaign, layout: plan.layout, hidePrices: plan.hidePrices || mode === 'percent' };
   const { jpg, badge, unchanged } = await renderPreview(url, item, cfg.images, ctx);
   res.set('X-Unchanged', unchanged ? '1' : '0');
   res.set('Content-Type', 'image/jpeg');

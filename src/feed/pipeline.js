@@ -27,7 +27,8 @@ export function activeProfiles(project) {
 /** Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka. */
 export function imageModeOf(profile) {
   if (channelOf(profile.channel) === 'google') return 'original';
-  return ['original', 'clean'].includes(profile.imageMode) ? profile.imageMode : 'project'; // clean = upravený formát bez cien a akcií
+  // clean = upravený formát bez cien a akcií, percent = akcia a % zľavy bez cien
+  return ['original', 'clean', 'percent'].includes(profile.imageMode) ? profile.imageMode : 'project';
 }
 
 /** Zdrojové ID a skupina variantov položky: na ne sú naviazané nastavenia produktov (pravidlá môžu id prepísať). */
@@ -134,14 +135,14 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
   const img = cfg.images;
   const mode = imageModeOf(profile);
   if (img.enabled && mode !== 'original') {
-    log(`Spracúvam obrázky (${mode === 'clean' ? 'bez cien a akcií' : 's cenami a akciami'}, súbežne ${config.imageConcurrency})`);
+    log(`Spracúvam obrázky (${{ clean: 'bez cien a akcií', percent: 'len akcia a % zľavy' }[mode] || 's cenami a akciami'}, súbežne ${config.imageConcurrency})`);
     await mapLimit(processed, config.imageConcurrency, async (item) => {
       const url = fieldValue(item, 'image_link');
       if (!url) { ps.images.skipped++; return; }
       try {
         const plan = mode === 'clean' ? null : resolveCampaign(item, sources.get(item), cfg, at);
         if (plan?.campaign) ps.campaigns[plan.campaign.id] = (ps.campaigns[plan.campaign.id] || 0) + 1;
-        const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout, hidePrices: plan?.hidePrices };
+        const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout, hidePrices: plan?.hidePrices || mode === 'percent' };
         const { file: out, cached } = await ensureImage(project.slug, url, item, img, ctx);
         if (!out) { ps.images.skipped++; return; } // bez badge ostáva pôvodná fotka
         used.add(out);

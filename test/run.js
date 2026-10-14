@@ -839,8 +839,19 @@ await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil o
   const file = path.join(tmp, 'images', byId(promo, '003').image_link.split('/img/')[1]);
   const c = [...(await sharp(file).extract({ left: 22, top: 498, width: 1, height: 1 }).raw().toBuffer())];
   assert.ok(c[0] > 220 && c[1] > 110 && c[1] < 180 && c[2] < 60, `farba štítku: ${c}`);
+  // profil "len % zľavy": rovnaká akcia, ale bez cien; zľavnený produkt má iný obrázok ako s cenami
+  const cur = projects.get(proj.id);
+  const upd = projects.update(proj.id, { ...cur, config: { ...cur.config, profiles: [...cur.config.profiles, { slug: 'akcie-test-pct', name: 'Meta %', channel: 'meta', imageMode: 'percent' }] } });
+  assert.equal(upd.config.profiles.find((x) => x.slug === 'akcie-test-pct').imageMode, 'percent');
+  const s2 = await runProject(upd, () => {});
+  assert.equal(s2.error, undefined, JSON.stringify(s2));
+  const pct = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'akcie-test-pct.xml'), 'utf8')).items;
+  const promo2 = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'akcie-test.xml'), 'utf8')).items;
+  assert.match(byId(pct, '001').image_link, /\/img\//);
+  assert.notEqual(byId(pct, '001').image_link, byId(promo2, '001').image_link, 'bez cien je iný obrázok');
+  assert.equal(byId(pct, '003').image_link, byId(promo2, '003').image_link, 'produkt bez zľavy má rovnaký štítok');
   projects.remove(proj.id);
-  for (const f of ['akcie-test', 'akcie-test-clean']) fs.rmSync(path.join(tmp, 'feeds', `${f}.xml`), { force: true });
+  for (const f of ['akcie-test', 'akcie-test-clean', 'akcie-test-pct']) fs.rmSync(path.join(tmp, 'feeds', `${f}.xml`), { force: true });
 });
 
 console.log('Upozornenia');

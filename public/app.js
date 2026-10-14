@@ -360,7 +360,7 @@ function tabProfiles() {
           selectInput('Kanál', pr, 'channel', CHANNELS, () => render()),
           google
             ? h('label', { class: 'f' }, 'Obrázky', h('input', { type: 'text', value: 'Pôvodné fotky (Google)', readonly: true }))
-            : selectInput('Obrázky', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' })),
+            : selectInput('Obrázky', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', percent: 'Len akcia a % zľavy, bez cien', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' })),
         h('details', { open: pr.rules.length > 0 },
           h('summary', {}, `Pravidlá len pre tento profil (${pr.rules.length})`),
           rulesEditor(pr.rules, 'Žiadne vlastné pravidlá. Platia len pravidlá projektu.')));

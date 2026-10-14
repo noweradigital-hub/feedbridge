@@ -84,7 +84,7 @@ export function normalizeProfiles(list, projectSlug) {
     name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
     channel: p.channel === 'google' ? 'google' : 'meta',
     enabled: p.enabled !== false,
-    imageMode: ['original', 'clean'].includes(p.imageMode) ? p.imageMode : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
+    imageMode: ['original', 'clean', 'percent'].includes(p.imageMode) ? p.imageMode : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
     rules: Array.isArray(p.rules) ? p.rules : [],
   }));
   if (!out.length && projectSlug) {
