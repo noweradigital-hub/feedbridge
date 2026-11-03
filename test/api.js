@@ -52,7 +52,7 @@ await t('admin bez hesla = 401, so zlým heslom = 401', async () => {
 await t('UI sa servíruje po prihlásení', async () => {
   const r = await fetch(base + '/admin/', { headers: auth });
   assert.equal(r.status, 200);
-  assert.match(await r.text(), /FeedBridge/);
+  assert.match(await r.text(), /nowera feeds/);
 });
 
 let proj;
