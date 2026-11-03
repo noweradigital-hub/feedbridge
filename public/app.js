@@ -93,7 +93,7 @@ async function loadProjects(selectId) {
 }
 
 function renderEmpty() {
-  document.getElementById('main').replaceChildren(h('div', { class: 'card' }, h('h1', {}, 'Vitaj vo FeedBridge'),
+  document.getElementById('main').replaceChildren(h('div', { class: 'card' }, h('h1', {}, 'Vitaj v nowera feeds'),
     h('p', { class: 'muted' }, 'Vytvor prvý projekt (jeden eshop = jeden projekt), vlož URL feedu z WooCommerce pluginu a nastav pravidlá.')));
 }
 
@@ -221,7 +221,7 @@ function tabSettings() {
       textInput('Aktualizovať každých (minút, 15-1440)', p, 'interval_minutes', { type: 'number' }),
       textInput('Poistka: max. pokles položiek oproti minulému feedu (%, 0 = vypnuté)', p.config.safety, 'maxDropPct', { type: 'number' }),
       checkInput('Automatické spúšťanie zapnuté', p, 'enabled'))),
-    h('p', { class: 'muted' }, 'Meta si v Commerce Manageri (Zdroje dát → Naplánovaný feed) nastaví URL hore. FeedBridge ju každých N minút prepočíta zo zdrojového feedu; ak zdroj zlyhá, posledný dobrý feed ostáva dostupný.'),
+    h('p', { class: 'muted' }, 'Meta si v Commerce Manageri (Zdroje dát → Naplánovaný feed) nastaví URL hore. nowera feeds ju každých N minút prepočíta zo zdrojového feedu; ak zdroj zlyhá, posledný dobrý feed ostáva dostupný.'),
     h('h2', {}, 'História nastavení'),
     h('div', { class: 'card', id: 'versions-box' }, versionsList()));
 }
