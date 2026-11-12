@@ -443,7 +443,7 @@ app.post('/api/projects/:id/versions/:vid/restore', wrap((req, res) => {
   const byId = new Map((old.profiles || []).map((pr) => [pr.id, pr]));
   const profiles = p.config.profiles.map((pr) => {
     const o = byId.get(pr.id);
-    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, rules: o.rules } : pr;
+    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, imageModeVersion: o.imageModeVersion, rules: o.rules } : pr;
   });
   const restored = projects.update(p.id, { ...p, config: { ...old, profiles } });
   res.json(publicProject(restored));

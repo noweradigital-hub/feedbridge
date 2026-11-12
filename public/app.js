@@ -341,7 +341,7 @@ function tabProfiles() {
   const profiles = p.config.profiles;
   return h('div', {},
     h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))),
-    h('p', { class: 'muted' }, 'Každý profil je samostatný feed s vlastnou URL. Zdroj a spoločné pravidlá má projekt, profil si pridáva vlastné pravidlá a určuje, aké obrázky dostane kanál. Google a ChatGPT dostávajú vždy pôvodnú fotku: Google promo grafiku ako hlavný obrázok nepovoľuje, OpenAI pravidlá k nej nezverejnil.'),
+    h('p', { class: 'muted' }, 'Každý profil je samostatný feed s vlastnou URL. Zdroj a spoločné pravidlá má projekt, profil si pridáva vlastné pravidlá a určuje, aký vizuál obrázkov dostane kanál. Google a ChatGPT majú predvolene pôvodné fotky: Google promo grafiku na hlavnom obrázku zamieta, OpenAI pravidlá k nej nezverejnil.'),
     profiles.map((pr, i) => {
       const isNew = !pr.feed_url; // ešte neuložený: slug sa dá zvoliť, potom je navždy
       const google = pr.channel === 'google';
@@ -362,9 +362,10 @@ function tabProfiles() {
           h('label', { class: 'f' }, isNew ? 'Slug (URL feedu, po uložení sa nemení)' : 'Slug (URL feedu)',
             h('input', { type: 'text', id: `slug-${i}`, value: pr.slug, readonly: !isNew, oninput: (e) => { pr.slug = e.target.value; pr.slugTouched = true; markDirty(); } })),
           selectInput('Kanál', pr, 'channel', CHANNELS, () => render()),
-          google || chatgpt
-            ? h('label', { class: 'f' }, 'Obrázky', h('input', { type: 'text', value: `Pôvodné fotky (${CHANNELS[pr.channel]})`, readonly: true }))
-            : selectInput('Obrázky', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', percent: 'Len akcia a % zľavy, bez cien', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' })),
+          selectInput('Vizuál obrázkov', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', percent: 'Len akcia a % zľavy, bez cien', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' }, () => { pr.imageModeVersion = 2; render(); })),
+        google && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'tag warning', style: 'white-space:normal;line-height:1.4;padding:8px 12px;border-radius:10px' },
+          'Google Merchant Center zamieta hlavné obrázky s promo textom (ceny, zľavy, štítky akcie) a produkty potom nezobrazí. Bezpečný je „Upravený formát“ alebo pôvodné fotky.') : null,
+        chatgpt && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'muted' }, 'OpenAI pravidlá k textu na obrázkoch nezverejnil, over si to pri schvaľovaní.') : null,
         chatgpt ? h('div', {},
           h('h3', {}, 'Údaje pre OpenAI'),
           h('div', { class: 'grid' },
@@ -382,7 +383,7 @@ function tabProfiles() {
       ...Object.entries(CHANNELS).map(([ch, label]) => h('button', { class: 'btn', onclick: () => {
         let slug = `${p.slug}-${ch}`;
         for (let n = 2; profiles.some((x) => x.slug === slug); n++) slug = `${p.slug}-${ch}-${n}`;
-        profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'meta' ? 'project' : 'original', rules: [] });
+        profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'meta' ? 'project' : 'original', imageModeVersion: 2, rules: [] });
         markDirty(); render();
       } }, `+ Profil pre ${label}`))));
 }
@@ -496,7 +497,7 @@ function tabImages() {
   return h('div', {},
     h('div', { class: 'card' },
       checkInput('Upravovať obrázky produktov', s, 'enabled', relayout),
-      h('p', { class: 'muted' }, 'Pôvodná fotka ostáva, pridajú sa na ňu ceny, zľava a akcia podľa šablóny. Google profily dostávajú vždy fotku bez úprav. Šablónu a akciu jednotlivých produktov nastavíš v záložke Produkty.')),
+      h('p', { class: 'muted' }, 'Pôvodná fotka ostáva, pridajú sa na ňu ceny, zľava a akcia podľa šablóny. Aký vizuál dostane ktorý kanál, nastavíš v záložke Profily. Šablónu a akciu jednotlivých produktov nastavíš v záložke Produkty.')),
 
     h('h2', {}, 'Značka'),
     h('div', { class: 'card' }, h('div', { class: 'grid' },

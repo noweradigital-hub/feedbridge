@@ -319,6 +319,27 @@ await t('Google profil: pôvodná fotka, hodnoty v Google formáte, vlastné pra
   assert.match(g[0].title, / \| Google$/);
   assert.ok(!readOut('test-demo')[0].title.includes('Google')); // pravidlo profilu neovplyvní iný profil
 });
+await t('vizuál pre Google a ChatGPT: starý záznam ostáva pri pôvodnej fotke, zvolený vizuál platí', async () => {
+  const { normalizeProfiles } = await import('../src/db.js');
+  const [old, chosen, gpt] = normalizeProfiles([
+    { slug: 'x-google', channel: 'google', imageMode: 'project' },
+    { slug: 'x-google-2', channel: 'google', imageMode: 'clean', imageModeVersion: 2 },
+    { slug: 'x-gpt', channel: 'chatgpt', imageMode: 'percent', imageModeVersion: 2 },
+  ], 'x');
+  assert.equal(old.imageMode, 'original');
+  assert.equal(chosen.imageMode, 'clean');
+  assert.equal(gpt.imageMode, 'percent');
+  const proj = projects.create({ name: 'Viz', slug: 'viz-test', source_url: `${base}/feed.xml`, config: {
+    images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },
+    profiles: [{ slug: 'viz-test', name: 'Google promo', channel: 'google', imageMode: 'project', imageModeVersion: 2 }],
+  } });
+  const s = await runProject(proj, () => {});
+  assert.equal(s.error, undefined, JSON.stringify(s));
+  const items = readOut('viz-test');
+  assert.match(items.find((i) => i.id === '001').image_link, /\/img\/viz-test\//, 'zľavnený produkt má grafiku aj v Google feede');
+  projects.remove(proj.id);
+  fs.rmSync(path.join(tmp, 'feeds', 'viz-test.xml'), { force: true });
+});
 await t('Meta profil s pôvodnými fotkami a vlastným vylúčením', () => {
   const c = readOut('test-demo-clean');
   assert.equal(c.length, 1);

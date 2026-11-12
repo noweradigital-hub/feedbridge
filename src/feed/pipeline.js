@@ -30,13 +30,15 @@ export const feedNameOf = (profile) => `${profile.slug}${channelOf(profile.chann
 export const feedFileOf = (profile) => path.join(config.feedsDir, feedNameOf(profile));
 
 /**
- * Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka.
- * ChatGPT tiež: pravidlá OpenAI o texte na obrázku nie sú zverejnené.
+ * Vizuál profilu (normalizované v db.js): project = ceny a akcie, percent = akcia a % zľavy bez cien,
+ * clean = upravený formát bez grafiky, original = fotka z e-shopu. Google a ChatGPT majú predvolene
+ * original; promo grafiku si tam treba zvoliť vedome (Google ju na hlavnom obrázku zamieta).
  */
 export function imageModeOf(profile) {
-  if (['google', 'chatgpt'].includes(channelOf(profile.channel))) return 'original';
-  // clean = upravený formát bez cien a akcií, percent = akcia a % zľavy bez cien
-  return ['original', 'clean', 'percent'].includes(profile.imageMode) ? profile.imageMode : 'project';
+  const meta = channelOf(profile.channel) === 'meta';
+  if (!meta && profile.imageModeVersion !== 2) return 'original'; // starý záznam: kanál mal pevne pôvodnú fotku
+  if (['project', 'percent', 'clean', 'original'].includes(profile.imageMode)) return profile.imageMode;
+  return meta ? 'project' : 'original';
 }
 
 /** Zdrojové ID a skupina variantov položky: na ne sú naviazané nastavenia produktov (pravidlá môžu id prepísať). */

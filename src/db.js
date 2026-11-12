@@ -78,18 +78,35 @@ function rowToProject(r) {
  * Projekt bez profilov (staršie verzie) dostane predvolený so slugom projektu, takže
  * pôvodná URL feedu ostáva v platnosti.
  */
+export const IMAGE_MODES = ['project', 'percent', 'clean', 'original'];
+
+/**
+ * Vizuál profilu. Google a ChatGPT mali kedysi pevne pôvodnú fotku a uložené `imageMode` sa u nich
+ * ignorovalo (býva tam 'project'). Platí preto len hodnota zvolená po zmene (imageModeVersion 2),
+ * staré profily týchto kanálov ostávajú pri pôvodnej fotke.
+ */
+function profileImageMode(p, channel) {
+  const valid = IMAGE_MODES.includes(p.imageMode);
+  if (channel === 'meta') return valid ? p.imageMode : 'project';
+  return p.imageModeVersion === 2 && valid ? p.imageMode : 'original';
+}
+
 export function normalizeProfiles(list, projectSlug) {
-  const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => Object.assign({
-    id: typeof p.id === 'string' && /^[a-z0-9]{1,16}$/.test(p.id) ? p.id : crypto.randomBytes(4).toString('hex'),
-    slug: p.slug,
-    name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
-    channel: ['google', 'chatgpt'].includes(p.channel) ? p.channel : 'meta',
-    enabled: p.enabled !== false,
-    imageMode: ['original', 'clean', 'percent'].includes(p.imageMode) ? p.imageMode : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
-    rules: Array.isArray(p.rules) ? p.rules : [],
-  }, p.channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {})); // predajca a vrátenie tovaru pre OpenAI
+  const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => {
+    const channel = ['google', 'chatgpt'].includes(p.channel) ? p.channel : 'meta';
+    return Object.assign({
+      id: typeof p.id === 'string' && /^[a-z0-9]{1,16}$/.test(p.id) ? p.id : crypto.randomBytes(4).toString('hex'),
+      slug: p.slug,
+      name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
+      channel,
+      enabled: p.enabled !== false,
+      imageMode: profileImageMode(p, channel),
+      imageModeVersion: 2,
+      rules: Array.isArray(p.rules) ? p.rules : [],
+    }, channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {}); // predajca a vrátenie tovaru pre OpenAI
+  });
   if (!out.length && projectSlug) {
-    out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', rules: [] });
+    out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', imageModeVersion: 2, rules: [] });
   }
   return out;
 }
