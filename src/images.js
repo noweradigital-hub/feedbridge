@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import sharp from 'sharp';
 import { config } from './config.js';
 import { testWhen } from './feed/rules.js';
+import { readOpenAIFeed } from './feed/openai.js';
 import { safeFetch } from './net.js';
 import { removeBackground as magnificRemoveBackground } from './magnific.js';
 import { resolveBadge, renderBadge, isHex, stripHeight } from './badge.js';
@@ -243,10 +244,10 @@ const BORDER_TOLERANCE = 10; // o koľko sa smie pixel okraja líšiť od mediá
 export async function originalJpeg(hash) {
   if (!/^[0-9a-f]{40}$/.test(hash)) return null;
   const file = path.join(config.cacheDir, 'orig', 'c-' + hash);
-  if (!(await exists(file))) return null;
   // prevod sa robí raz a ukladá: adresa je verejná, opakované volania nesmú zaťažovať procesor
   const converted = path.join(config.cacheDir, 'orig', 'j-' + hash + '.jpg');
   if (await exists(converted)) return fs.readFile(converted);
+  if (!(await exists(file))) return null;
   return once(converted, async () => {
     const jpg = await untrusted(await fs.readFile(file)).rotate().flatten({ background: '#ffffff' })
       .resize(4096, 4096, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 92 }).toBuffer();
@@ -601,12 +602,25 @@ export async function pruneImages(slug, usedFiles, retentionDays = config.imageR
 export async function pruneCache(retentionDays = config.cacheRetentionDays) {
   const limit = Date.now() - retentionDays * DAY;
   let removed = 0;
+  // originály, na ktoré odkazuje niektorý zverejnený ChatGPT feed cez /src/<odtlačok>.jpg, ostávajú
+  // (aj keď projekt alebo profil dlhšie nebeží: feed je stále na stiahnutie)
+  const keep = new Set();
+  const prefix = `${config.publicUrl}/src/`;
+  for (const n of await fs.readdir(config.feedsDir).catch(() => [])) {
+    if (!n.endsWith('.jsonl.gz')) continue;
+    try {
+      for (const r of readOpenAIFeed(await fs.readFile(path.join(config.feedsDir, n)))) {
+        const u = String(r.image_url || '');
+        if (u.startsWith(prefix)) { const h = u.slice(prefix.length, -4); keep.add('c-' + h); keep.add('j-' + h + '.jpg'); }
+      }
+    } catch { /* poškodený súbor: nič z neho nedržíme */ }
+  }
   for (const kind of ['orig', 'cutouts', 'bg']) {
     const dir = path.join(config.cacheDir, kind);
     for (const n of await fs.readdir(dir).catch(() => [])) {
       const file = path.join(dir, n);
       const st = await fs.stat(file).catch(() => null);
-      if (st && st.isFile() && st.mtimeMs < limit) {
+      if (st && st.isFile() && st.mtimeMs < limit && !(kind === 'orig' && keep.has(n))) {
         await fs.rm(file, { force: true });
         removed++;
       }

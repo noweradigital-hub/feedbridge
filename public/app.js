@@ -8,7 +8,7 @@ const FIELDS = ['id', 'title', 'description', 'link', 'image_link', 'additional_
 const OPS = { eq: 'sa rovná', neq: 'nerovná sa', contains: 'obsahuje', ncontains: 'neobsahuje', regex: 'regex',
   empty: 'je prázdne', nempty: 'nie je prázdne', gt: '>', lt: '<', gte: '≥', lte: '≤', in: 'je jedno z (a,b,c)' };
 
-const CHANNELS = { meta: 'Meta', google: 'Google' };
+const CHANNELS = { meta: 'Meta', google: 'Google', chatgpt: 'ChatGPT' };
 const LAYOUT_NAMES = { 'layout-1': 'Layout 1', 'layout-2': 'Layout 2', 'layout-3': 'Layout 3' };
 
 const RULE_TYPES = {
@@ -144,6 +144,7 @@ function render() {
     ...p.config.profiles.filter((pr) => pr.feed_url).map((pr) => h('div', { class: 'feedurl' },
       h('span', { class: 'tag' }, CHANNELS[pr.channel]), h('span', { class: 'muted' }, `${pr.name}:`), h('code', {}, pr.feed_url),
       h('button', { class: 'btn small', onclick: () => { navigator.clipboard.writeText(pr.feed_url); toast('Skopírované'); } }, 'Kopírovať'),
+      pr.has_feed ? h('a', { class: 'btn small', href: pr.feed_url, download: pr.feed_url.split('/').pop() }, 'Stiahnuť') : null,
       pr.enabled === false ? h('span', { class: 'tag warning' }, 'vypnutý') : null,
       pr.has_feed ? null : h('span', { class: 'muted' }, '(feed ešte nebol vygenerovaný)'))),
     h('div', { class: 'tabs' }, Object.entries(tabs).map(([k, t]) =>
@@ -340,10 +341,13 @@ function tabProfiles() {
   const profiles = p.config.profiles;
   return h('div', {},
     h('datalist', { id: 'fields' }, FIELDS.map((f) => h('option', { value: f }))),
-    h('p', { class: 'muted' }, 'Každý profil je samostatný feed s vlastnou URL. Zdroj a spoločné pravidlá má projekt, profil si pridáva vlastné pravidlá a určuje, aké obrázky dostane kanál. Google dostáva vždy pôvodnú fotku: promo grafiku ako hlavný obrázok nepovoľuje.'),
+    h('p', { class: 'muted' }, 'Každý profil je samostatný feed s vlastnou URL. Zdroj a spoločné pravidlá má projekt, profil si pridáva vlastné pravidlá a určuje, aké obrázky dostane kanál. Google a ChatGPT dostávajú vždy pôvodnú fotku: Google promo grafiku ako hlavný obrázok nepovoľuje, OpenAI pravidlá k nej nezverejnil.'),
     profiles.map((pr, i) => {
       const isNew = !pr.feed_url; // ešte neuložený: slug sa dá zvoliť, potom je navždy
       const google = pr.channel === 'google';
+      const chatgpt = pr.channel === 'chatgpt';
+      if (chatgpt && !pr.openai) pr.openai = { sellerName: '', sellerUrl: '', returnPolicy: '', returnDays: 14, country: 'SK' };
+      const o = pr.openai;
       return h('div', { class: 'card rule' + (pr.enabled === false ? ' off' : '') },
         h('div', { class: 'rule-head' },
           h('b', {}, pr.name || `Profil ${i + 1}`), h('span', { class: 'tag' }, CHANNELS[pr.channel]),
@@ -358,9 +362,18 @@ function tabProfiles() {
           h('label', { class: 'f' }, isNew ? 'Slug (URL feedu, po uložení sa nemení)' : 'Slug (URL feedu)',
             h('input', { type: 'text', id: `slug-${i}`, value: pr.slug, readonly: !isNew, oninput: (e) => { pr.slug = e.target.value; pr.slugTouched = true; markDirty(); } })),
           selectInput('Kanál', pr, 'channel', CHANNELS, () => render()),
-          google
-            ? h('label', { class: 'f' }, 'Obrázky', h('input', { type: 'text', value: 'Pôvodné fotky (Google)', readonly: true }))
+          google || chatgpt
+            ? h('label', { class: 'f' }, 'Obrázky', h('input', { type: 'text', value: `Pôvodné fotky (${CHANNELS[pr.channel]})`, readonly: true }))
             : selectInput('Obrázky', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', percent: 'Len akcia a % zľavy, bez cien', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' })),
+        chatgpt ? h('div', {},
+          h('h3', {}, 'Údaje pre OpenAI'),
+          h('div', { class: 'grid' },
+            textInput('Názov predajcu (seller_name, povinné)', o, 'sellerName', { placeholder: 'ako na e-shope, napr. Kidvak' }),
+            textInput('Web predajcu', o, 'sellerUrl', { type: 'url', placeholder: 'https://' }),
+            textInput('Podmienky vrátenia tovaru (URL)', o, 'returnPolicy', { type: 'url', placeholder: 'https://' }),
+            textInput('Lehota na vrátenie (dni, 0 = nevracia sa)', o, 'returnDays', { type: 'number' }),
+            textInput('Krajina obchodu (ISO kód)', o, 'country', { placeholder: 'SK' })),
+          h('p', { class: 'muted' }, 'OpenAI si feed nesťahuje: súbor .jsonl.gz sa nahráva k nim cez SFTP, ktorý dostaneš po schválení na chatgpt.com/merchants. Dovtedy ho stiahneš tlačidlom pri URL feedu. ChatGPT nákupy sú zatiaľ spustené len v USA.')) : null,
         h('details', { open: pr.rules.length > 0 },
           h('summary', {}, `Pravidlá len pre tento profil (${pr.rules.length})`),
           rulesEditor(pr.rules, 'Žiadne vlastné pravidlá. Platia len pravidlá projektu.')));
@@ -369,7 +382,7 @@ function tabProfiles() {
       ...Object.entries(CHANNELS).map(([ch, label]) => h('button', { class: 'btn', onclick: () => {
         let slug = `${p.slug}-${ch}`;
         for (let n = 2; profiles.some((x) => x.slug === slug); n++) slug = `${p.slug}-${ch}-${n}`;
-        profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'google' ? 'original' : 'project', rules: [] });
+        profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'meta' ? 'project' : 'original', rules: [] });
         markDirty(); render();
       } }, `+ Profil pre ${label}`))));
 }

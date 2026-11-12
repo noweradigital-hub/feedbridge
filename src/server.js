@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { projects, runs, versions, validSlug, normalizeProfiles, normalizeConfig } from './db.js';
 import { triggerRun, isRunning, startScheduler } from './runner.js';
-import { previewProject, imageModeOf } from './feed/pipeline.js';
+import { previewProject, imageModeOf, feedFileOf, feedNameOf } from './feed/pipeline.js';
+import { readOpenAIFeed } from './feed/openai.js';
 import { parseFeed } from './feed/parse.js';
 import { fetchSource } from './feed/pipeline.js';
 import { renderPreview, validAssetName, originalJpeg, imagePlan } from './images.js';
@@ -23,11 +24,12 @@ app.use(express.json({ limit: '2mb' }));
 
 // ---------------------------------------------------------------- verejné časti (Meta si sťahuje feed a obrázky)
 app.get('/feeds/:file', (req, res) => {
-  const m = /^([a-z0-9-]+)\.xml$/.exec(req.params.file);
+  const m = /^([a-z0-9-]+)\.(xml|jsonl\.gz)$/.exec(req.params.file);
   if (!m) return res.status(404).end();
-  const file = path.join(config.feedsDir, `${m[1]}.xml`);
+  const file = path.join(config.feedsDir, `${m[1]}.${m[2]}`);
   if (!fs.existsSync(file)) return res.status(404).send('Feed ešte nebol vygenerovaný');
-  res.set('Content-Type', 'application/xml; charset=utf-8');
+  if (m[2] === 'xml') res.set('Content-Type', 'application/xml; charset=utf-8');
+  else { res.set('Content-Type', 'application/gzip'); res.set('Content-Disposition', `attachment; filename="${m[1]}.jsonl.gz"`); }
   res.set('Cache-Control', 'public, max-age=300');
   fs.createReadStream(file).pipe(res);
 });
@@ -71,12 +73,13 @@ const wrap = (fn) => (req, res) =>
     .then(() => fn(req, res))
     .catch((e) => res.status(e.status || 500).json({ error: e.message }));
 
-const feedFile = (slug) => path.join(config.feedsDir, `${slug}.xml`);
+// pri mazaní profilu nevieme, či sa medzitým nezmenil kanál: zmažú sa obe podoby
+const removeFeeds = (slug) => { for (const ext of ['xml', 'jsonl.gz']) fs.rmSync(path.join(config.feedsDir, `${slug}.${ext}`), { force: true }); };
 
 function publicProject(p) {
   // feed_url a has_feed pri profiloch sú len na čítanie, pri ukladaní ich normalizeProfiles zahodí
   const profiles = p.config.profiles.map((pr) => ({
-    ...pr, feed_url: `${config.publicUrl}/feeds/${pr.slug}.xml`, has_feed: fs.existsSync(feedFile(pr.slug)),
+    ...pr, feed_url: `${config.publicUrl}/feeds/${feedNameOf(pr)}`, has_feed: fs.existsSync(feedFileOf(pr)),
   }));
   return {
     ...p,
@@ -175,10 +178,20 @@ app.put('/api/projects/:id', wrap((req, res) => {
   if (isRunning(id) && old.config.profiles.some((p) => !keptSlugs.has(p.slug))) {
     throw new HttpError(409, 'Projekt sa práve spracúva. Profil sa dá zmazať až po dokončení behu.');
   }
+  // to isté pri zmene kanála: beh by zapísal súbor v starom formáte (napr. XML) po tom, čo sme ho zmazali
+  const newChannel = new Map(data.config.profiles.map((p) => [p.slug, feedNameOf(p)]));
+  if (isRunning(id) && old.config.profiles.some((p) => newChannel.has(p.slug) && newChannel.get(p.slug) !== feedNameOf(p))) {
+    throw new HttpError(409, 'Projekt sa práve spracúva. Kanál profilu sa dá zmeniť až po dokončení behu.');
+  }
   const updated = projects.update(id, data);
   // odstránený profil: jeho feed zmizne, aby kanál nedostával potichu zastarané dáta
   const kept = new Set(updated.config.profiles.map((p) => p.slug));
-  for (const p of old.config.profiles) if (!kept.has(p.slug)) fs.rmSync(feedFile(p.slug), { force: true });
+  for (const p of old.config.profiles) if (!kept.has(p.slug)) removeFeeds(p.slug);
+  // zmenený kanál = iný súbor; starý (napr. XML po prepnutí na ChatGPT) by inak ostal verejný
+  for (const p of updated.config.profiles) {
+    const before = old.config.profiles.find((o) => o.slug === p.slug);
+    if (before && feedNameOf(before) !== feedNameOf(p)) fs.rmSync(feedFileOf(before), { force: true });
+  }
   res.json(publicProject(updated));
 }));
 
@@ -212,7 +225,7 @@ app.delete('/api/projects/:id', wrap((req, res) => {
   if (!p) return res.status(404).json({ error: 'Projekt neexistuje' });
   if (isRunning(p.id)) throw new HttpError(409, 'Projekt sa práve spracúva. Zmazať sa dá až po dokončení behu.');
   projects.remove(p.id);
-  for (const pr of p.config.profiles) fs.rmSync(feedFile(pr.slug), { force: true });
+  for (const pr of p.config.profiles) removeFeeds(pr.slug);
   fs.rmSync(path.join(config.imagesDir, p.slug), { recursive: true, force: true });
   res.json({ ok: true });
 }));
@@ -441,9 +454,12 @@ app.get('/api/projects/:id/output', wrap((req, res) => {
   const p = projects.get(Number(req.params.id));
   if (!p) return res.status(404).json({ error: 'Projekt neexistuje' });
   const profile = p.config.profiles.find((pr) => pr.slug === req.query.profile) || p.config.profiles[0];
-  const file = feedFile(profile.slug);
+  const file = feedFileOf(profile);
   if (!fs.existsSync(file)) return res.json({ profile: profile.slug, generated_at: null, items: [] });
-  const { items } = parseFeed(fs.readFileSync(file, 'utf8'));
+  // ChatGPT riadky sa prevedú späť na polia Google/Meta, aby galéria fungovala rovnako
+  const items = file.endsWith('.gz')
+    ? readOpenAIFeed(fs.readFileSync(file)).map((r) => ({ id: r.item_id, title: r.title, price: r.price, sale_price: r.sale_price, availability: r.availability, image_link: r.image_url, additional_image_link: [] }))
+    : parseFeed(fs.readFileSync(file, 'utf8')).items;
   res.json({
     profile: profile.slug,
     generated_at: fs.statSync(file).mtime.toISOString(),

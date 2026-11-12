@@ -281,6 +281,11 @@ const TO_GOOGLE = {
   'in stock': 'in_stock', 'out of stock': 'out_of_stock', preorder: 'preorder',
   'available for order': 'backorder', discontinued: 'out_of_stock',
 };
+// ChatGPT (OpenAI Product Feed Spec) má vlastné hodnoty dostupnosti
+const TO_OPENAI = {
+  'in stock': 'in_stock', 'out of stock': 'out_of_stock', preorder: 'pre_order',
+  'available for order': 'backorder', discontinued: 'out_of_stock',
+};
 // polia, ktoré pozná len Meta; v Google feede by boli hlásené ako neznáme atribúty
 const META_ONLY = ['quantity_to_sell_on_facebook', 'status', 'visibility', 'fb_product_category', 'internal_label', 'additional_variant_attribute'];
 
@@ -297,8 +302,15 @@ export const CHANNELS = {
     titleMax: 150, descriptionMax: 5000, additionalImages: 10,
     availability: ['in_stock', 'out_of_stock', 'preorder', 'backorder'],
   },
+  // https://developers.openai.com/commerce/specs/file-upload/products ; dĺžky sú len odporúčanie
+  chatgpt: {
+    label: 'ChatGPT',
+    required: ['id', 'title', 'description', 'link', 'image_link', 'price', 'availability', 'brand'],
+    titleMax: 150, descriptionMax: 5000, additionalImages: 20, softLimits: true,
+    availability: ['in_stock', 'out_of_stock', 'pre_order', 'backorder', 'unknown'],
+  },
 };
-export const channelOf = (name) => (name === 'google' ? 'google' : 'meta');
+export const channelOf = (name) => (Object.hasOwn(CHANNELS, name || '') ? name : 'meta');
 
 function metaAvailability(v) {
   return AVAILABILITY_MAP[String(v).trim().toLowerCase().replace(/\s+/g, '_')] ?? v;
@@ -311,12 +323,12 @@ export function normalizeForChannel(item, channel = 'meta') {
   const av = fieldValue(item, 'availability').trim().toLowerCase();
   if (av) {
     const meta = metaAvailability(av);
-    const target = ch === 'google' ? TO_GOOGLE[meta] : AVAILABILITY_MAP[av.replace(/\s+/g, '_')];
+    const target = ch === 'google' ? TO_GOOGLE[meta] : ch === 'chatgpt' ? (CHANNELS.chatgpt.availability.includes(av) ? av : TO_OPENAI[meta]) : AVAILABILITY_MAP[av.replace(/\s+/g, '_')];
     if (target && target !== item.availability) { item.availability = target; changed.push('availability'); }
   }
   const cond = fieldValue(item, 'condition').trim();
   if (cond && cond !== cond.toLowerCase()) { item.condition = cond.toLowerCase(); changed.push('condition'); }
-  if (ch === 'google') {
+  if (ch === 'google') { // ChatGPT z additional_variant_attribute skladá variant_dict, pri zápise sa aj tak berie len zoznam polí
     for (const f of META_ONLY) if (f in item) { delete item[f]; changed.push(f); }
   }
   const max = CHANNELS[ch].additionalImages;
@@ -341,10 +353,11 @@ export function checkItem(item, channel = 'meta') {
   for (const f of spec.required) {
     if (fieldValue(item, f).trim() === '') errors.push(`chýba ${f}`);
   }
+  const long = spec.softLimits ? warnings : errors; // OpenAI dĺžky len odporúča
   const t = fieldValue(item, 'title');
-  if (t.length > spec.titleMax) errors.push(`title > ${spec.titleMax} znakov`);
+  if (t.length > spec.titleMax) long.push(`title > ${spec.titleMax} znakov`);
   const d = fieldValue(item, 'description');
-  if (d.length > spec.descriptionMax) errors.push(`description > ${spec.descriptionMax} znakov`);
+  if (d.length > spec.descriptionMax) long.push(`description > ${spec.descriptionMax} znakov`);
   const p = parsePrice(fieldValue(item, 'price'));
   if (fieldValue(item, 'price') && !p) errors.push('price v neplatnom formáte');
   if (p && !p.currency) errors.push('price bez meny');
@@ -352,7 +365,17 @@ export function checkItem(item, channel = 'meta') {
   if (av && !spec.availability.includes(av.toLowerCase())) errors.push(`availability "${av}" nie je platná hodnota`);
   const cond = fieldValue(item, 'condition');
   if (cond && !CONDITIONS.includes(cond.toLowerCase())) errors.push(`condition "${cond}" nie je platná hodnota`);
-  if (!['brand', 'gtin', 'mpn'].some((f) => fieldValue(item, f).trim() !== '')) warnings.push('chýba brand (ani gtin/mpn)');
+  if (ch !== 'chatgpt' && !['brand', 'gtin', 'mpn'].some((f) => fieldValue(item, f).trim() !== '')) warnings.push('chýba brand (ani gtin/mpn)');
+  if (ch === 'chatgpt') {
+    const img = fieldValue(item, 'image_link').trim();
+    if (/\.webp(\?|$)/i.test(img)) warnings.push('image_link je WebP, OpenAI uvádza JPEG alebo PNG');
+    const group = fieldValue(item, 'item_group_id').trim();
+    if (group && group !== fieldValue(item, 'id').trim() && !['color', 'size', 'material', 'pattern', 'additional_variant_attribute'].some((f) => fieldValue(item, f).trim())) {
+      warnings.push('variant bez color/size/material/pattern: OpenAI nedostane, čím sa variant líši (variant_dict)');
+    }
+    const gtin = fieldValue(item, 'gtin').replace(/[\s-]/g, '');
+    if (gtin && !/^(\d{8}|\d{12,14})$/.test(gtin)) warnings.push('gtin nemá 8, 12, 13 ani 14 číslic, do feedu nepôjde');
+  }
   if (ch === 'google' && ['preorder', 'backorder'].includes(av.toLowerCase()) && !fieldValue(item, 'availability_date').trim()) {
     errors.push('chýba availability_date (Google ho pri predobjednávke a tovare na objednávku vyžaduje)');
   }

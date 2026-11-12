@@ -4,7 +4,8 @@ import { config } from '../config.js';
 import { parseFeed } from './parse.js';
 import { applyRules, checkItem, fieldValue, channelOf, CHANNELS } from './rules.js';
 import { buildFeedXml } from './xml.js';
-import { ensureImage, pruneImages, mapLimit } from '../images.js';
+import { buildOpenAIFeed, readOpenAIFeed, normalizeOpenAI } from './openai.js';
+import { ensureImage, pruneImages, mapLimit, fetchCached } from '../images.js';
 import { safeFetch } from '../net.js';
 import { resolveCampaign } from '../campaigns.js';
 
@@ -24,9 +25,16 @@ export function activeProfiles(project) {
   return (project.config.profiles || []).filter((p) => p.enabled !== false);
 }
 
-/** Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka. */
+/** Súbor zverejneného feedu profilu: XML pre Metu a Google, jsonl.gz pre ChatGPT. */
+export const feedNameOf = (profile) => `${profile.slug}${channelOf(profile.channel) === 'chatgpt' ? '.jsonl.gz' : '.xml'}`;
+export const feedFileOf = (profile) => path.join(config.feedsDir, feedNameOf(profile));
+
+/**
+ * Google nesmie dostať promo grafiku ako hlavný obrázok, preto vždy pôvodná fotka.
+ * ChatGPT tiež: pravidlá OpenAI o texte na obrázku nie sú zverejnené.
+ */
 export function imageModeOf(profile) {
-  if (channelOf(profile.channel) === 'google') return 'original';
+  if (['google', 'chatgpt'].includes(channelOf(profile.channel))) return 'original';
   // clean = upravený formát bez cien a akcií, percent = akcia a % zľavy bez cien
   return ['original', 'clean', 'percent'].includes(profile.imageMode) ? profile.imageMode : 'project';
 }
@@ -71,6 +79,11 @@ export class GuardError extends Error {
 
 /** Počet unikátnych neprázdnych ID v publikovanom feede (Meta páruje produkty podľa id). */
 async function previousIdCount(file) {
+  if (file.endsWith('.gz')) {
+    let buf;
+    try { buf = await fs.readFile(file); } catch { return null; }
+    try { return new Set(readOpenAIFeed(buf).map((r) => String(r.item_id ?? '').trim()).filter(Boolean)).size; } catch { return null; }
+  }
   let xml;
   try { xml = await fs.readFile(file, 'utf8'); } catch { return null; } // feed ešte neexistuje
   const ids = new Set();
@@ -106,6 +119,7 @@ const emptyImages = () => ({ generated: 0, cached: 0, failed: 0, skipped: 0 });
 /** Obrázky, na ktoré odkazuje práve zverejnený feed (aby ich upratovanie nezmazalo, keď profil tento raz nezapísal). */
 async function publishedImages(file) {
   const out = new Set();
+  if (file.endsWith('.gz')) return out; // ChatGPT má pôvodné fotky (prevedené originály drží pruneCache)
   let xml;
   try { xml = await fs.readFile(file, 'utf8'); } catch { return out; }
   const prefix = `${config.publicUrl}/img/`;
@@ -118,7 +132,9 @@ async function publishedImages(file) {
 /** Jeden profil: pravidlá projektu + profilu, poistka, obrázky, validácia pre kanál, atomický zápis. */
 async function runProfile(project, profile, items, channel, ps, used, log, forced, at) {
   const cfg = project.config;
-  const file = path.join(config.feedsDir, `${profile.slug}.xml`);
+  const file = feedFileOf(profile);
+  const openai = channelOf(profile.channel) === 'chatgpt';
+  if (openai && !normalizeOpenAI(profile.openai).sellerName) throw new Error('Profil ChatGPT nemá vyplnený názov predajcu (seller_name), OpenAI ho vyžaduje pri každom produkte.');
   const rules = rulesFor(project, profile);
   const processed = [];
   const sources = new Map(); // položka po pravidlách -> zdrojové ID a skupina
@@ -160,6 +176,23 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
     log(`Obrázky: nových ${ps.images.generated}, z cache ${ps.images.cached}, chýb ${ps.images.failed}`);
   }
 
+  // OpenAI berie len JPEG/PNG: iný formát (WebP z e-shopu) ide cez verejný prevod /src/<odtlačok>.jpg
+  if (openai) {
+    let converted = 0;
+    await mapLimit(processed, config.imageConcurrency, async (item) => {
+      const url = fieldValue(item, 'image_link').trim();
+      if (!/^https?:\/\//i.test(url) || /\.(jpe?g|png)(\?|#|$)/i.test(url)) return;
+      try {
+        const orig = await fetchCached(url, 'orig');
+        item.image_link = `${config.publicUrl}/src/${orig.hash}.jpg`;
+        converted++;
+      } catch (e) {
+        if (ps.warnings.length < 50) ps.warnings.push(`Obrázok ${fieldValue(item, 'id')}: ${e.message}`);
+      }
+    });
+    if (converted) log(`Obrázky v inom formáte než JPEG/PNG: ${converted} cez prevod na JPEG`);
+  }
+
   const seen = new Set();
   for (const item of processed) {
     const { errors, warnings } = checkItem(item, profile.channel);
@@ -172,7 +205,7 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
       ps.warnings.push(`Položka ${id || '?'}: ${[...errors, ...warnings.map((w) => `${w} (odporúčané)`)].join(', ')}`);
     }
   }
-  const out = buildFeedXml(channel, processed);
+  const out = openai ? buildOpenAIFeed(processed, profile.openai, at) : buildFeedXml(channel, processed);
   await fs.writeFile(file + '.tmp', out);
   await fs.rename(file + '.tmp', file);
   ps.written = processed.length;
@@ -213,7 +246,7 @@ export async function runProject(project, log = () => {}, { force = false } = {}
       if (e.guard) ps.guard = true;
       plog(`CHYBA: ${e.message}`);
       // profil ostáva pri starom feede, jeho obrázky sa preto stále používajú
-      for (const f of await publishedImages(path.join(config.feedsDir, `${profile.slug}.xml`))) used.add(f);
+      for (const f of await publishedImages(feedFileOf(profile))) used.add(f);
     }
     for (const k of ['excluded', 'written', 'invalid', 'notes']) summary[k] += ps[k];
     for (const k of Object.keys(summary.images)) summary.images[k] += ps.images[k];
@@ -221,7 +254,7 @@ export async function runProject(project, log = () => {}, { force = false } = {}
   }
   // profily, ktoré sú vypnuté, ale majú zverejnený feed, si svoje obrázky tiež držia
   for (const p of project.config.profiles || []) {
-    if (p.enabled === false) for (const f of await publishedImages(path.join(config.feedsDir, `${p.slug}.xml`))) used.add(f);
+    if (p.enabled === false) for (const f of await publishedImages(feedFileOf(p))) used.add(f);
   }
 
   const removed = await pruneImages(project.slug, used, config.imageRetentionDays);

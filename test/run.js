@@ -17,8 +17,9 @@ process.env.REMBG_RETRY_MS = '50';
 const { projects } = await import('../src/db.js');
 const { runProject } = await import('../src/feed/pipeline.js');
 const { parseFeed } = await import('../src/feed/parse.js');
+const { readOpenAIFeed, toOpenAI } = await import('../src/feed/openai.js');
 const { applyRules, renderTemplate, parsePrice, checkItem, testWhen, fieldValue } = await import('../src/feed/rules.js');
-const { ensureImage, pruneImages, pruneCache, renderPreview, fetchCached } = await import('../src/images.js');
+const { ensureImage, pruneImages, pruneCache, renderPreview, fetchCached, originalJpeg } = await import('../src/images.js');
 const { safeFetch, isPublicAddress } = await import('../src/net.js');
 const { notifyRun } = await import('../src/notify.js');
 const { config } = await import('../src/config.js');
@@ -35,6 +36,7 @@ const images = { 'a.jpg': await productJpg('#c0392b'), 'b.jpg': await productJpg
 images['swap.jpg'] = images['a.jpg'];
 images['flaky.jpg'] = images['c.jpg'];
 // "lifestyle" fotka: farebné pozadie až po okraj, výrez by nedával zmysel
+images['w.webp'] = await sharp(images['a.jpg']).webp().toBuffer();
 // priehľadné PNG s veľkým prázdnym okrajom: červený štvorec 200×200 v strede plátna 400×300
 images['tight.png'] = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect x="100" y="50" width="200" height="200" fill="#ff0000"/></svg>')).png().toBuffer();
 images['life.jpg'] = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="#8a6d4b"/><rect x="200" y="150" width="400" height="300" fill="#d9c7a3"/></svg>')).jpeg().toBuffer();
@@ -818,6 +820,88 @@ await t('priehľadné PNG: biely podklad, orez prázdnych okrajov a jednotný ok
   assert.ok((await px(r.file, 40, 260)).every((v) => v > 245), 'okraj 10 % ostal biely');
   assert.ok(red(await px(r.file, 62, 260)) && red(await px(r.file, 260, 62)), 'produkt vyplní plátno až po okraj');
   assert.ok(red(await px(r.file, 457, 457)) && (await px(r.file, 480, 480)).every((v) => v > 245), 'okraj je rovnaký aj vpravo dole');
+});
+await t('ChatGPT profil: jsonl.gz podľa OpenAI, pôvodné fotky, bez predajcu sa nezapíše', async () => {
+  const mk = (openai) => projects.create({ name: 'GPT', slug: 'gpt-test', source_url: `${base}/feed.xml`, config: {
+    images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },
+    profiles: [{ slug: 'gpt-test', name: 'Meta', channel: 'meta' }, { slug: 'gpt-test-chatgpt', name: 'ChatGPT', channel: 'chatgpt', openai,
+      rules: [{ type: 'set', field: 'image_link', value: `${base}/w.webp`, when: [{ field: 'id', op: 'eq', value: '002' }] }] }],
+  } });
+  const bad = mk({ sellerName: '' });
+  const s0 = await runProject(bad, () => {});
+  assert.match(s0.profiles['gpt-test-chatgpt'].error, /seller_name/);
+  assert.equal(s0.profiles['gpt-test'].error, undefined, 'Meta profil sa zapíše aj tak');
+  projects.remove(bad.id);
+  fs.rmSync(path.join(tmp, 'feeds', 'gpt-test.xml'), { force: true });
+
+  const proj = mk({ sellerName: 'Hračkáreň s.r.o.', returnPolicy: 'https://example.test/vratenie', returnDays: 30, country: 'sk', sellerUrl: 'nie-url' });
+  assert.deepEqual(proj.config.profiles[1].openai, { sellerName: 'Hračkáreň s.r.o.', sellerUrl: '', returnPolicy: 'https://example.test/vratenie', returnDays: 30, country: 'SK' });
+  const s = await runProject(proj, () => {});
+  assert.equal(s.error, undefined, JSON.stringify(s));
+  const rows = readOpenAIFeed(fs.readFileSync(path.join(tmp, 'feeds', 'gpt-test-chatgpt.jsonl.gz')));
+  assert.equal(rows.length, 3);
+  const r1 = rows.find((r) => r.item_id === '001');
+  assert.equal(r1.title, 'Drevená hračka & vláčik');
+  assert.equal(r1.description, 'Pekný vláčik z dreva. Ideálny darček.', 'HTML a entity preč');
+  assert.equal(r1.url, 'https://example.test/vlacik');
+  assert.equal(r1.image_url, `${base}/a.jpg`, 'pôvodná fotka, nie grafika s cenou');
+  assert.deepEqual(r1.additional_image_urls, [`${base}/b.jpg`]);
+  assert.equal(r1.price, '29.90 EUR');
+  assert.equal(r1.sale_price, '23.92 EUR');
+  assert.equal(r1.availability, 'in_stock');
+  assert.equal(r1.seller_name, 'Hračkáreň s.r.o.');
+  assert.equal(r1.product_category, 'Hračky > Drevené');
+  assert.equal(r1.condition, 'new');
+  assert.equal(r1.is_eligible_search, true);
+  assert.equal(r1.is_eligible_checkout, false);
+  assert.equal(r1.accepts_returns, true);
+  assert.equal(r1.return_deadline_in_days, 30);
+  assert.deepEqual(r1.target_countries, ['SK']);
+  assert.equal(r1.shipping, undefined, 'doprava Google formátu do OpenAI nejde');
+  const r2 = rows.find((r) => r.item_id === '002');
+  assert.equal(r2.availability, 'out_of_stock');
+  const m = new RegExp(`^${config.publicUrl.replace(/[.]/g, '\\.')}/src/([0-9a-f]{40})\\.jpg$`).exec(r2.image_url);
+  assert.ok(m, `WebP ide cez prevod na JPEG: ${r2.image_url}`);
+  assert.equal((await sharp(await originalJpeg(m[1])).metadata()).format, 'jpeg');
+  // prevedený JPEG ostáva dostupný aj keď originál vypadne z cache
+  fs.rmSync(path.join(tmp, 'cache', 'orig', 'c-' + m[1]));
+  assert.ok(await originalJpeg(m[1]), 'servíruje sa uložený prevod');
+  const old = new Date(Date.now() - 400 * 86400000);
+  fs.utimesSync(path.join(tmp, 'cache', 'orig', 'j-' + m[1] + '.jpg'), old, old);
+  await pruneCache(30);
+  assert.ok(fs.existsSync(path.join(tmp, 'cache', 'orig', 'j-' + m[1] + '.jpg')), 'zverejnený ChatGPT feed drží prevod v cache');
+  assert.equal(rows.find((r) => r.item_id === '003').brand, '');
+  assert.ok(s.profiles['gpt-test-chatgpt'].invalid >= 1, 'chýbajúci brand je chyba pre OpenAI');
+  assert.match(byIdMeta(), /\/img\/gpt-test\//, 'Meta profil grafiku má');
+  function byIdMeta() { return parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'gpt-test.xml'), 'utf8')).items.find((i) => i.id === '001').image_link; }
+  projects.remove(proj.id);
+  for (const f of ['gpt-test.xml', 'gpt-test-chatgpt.jsonl.gz']) fs.rmSync(path.join(tmp, 'feeds', f), { force: true });
+});
+await t('OpenAI riadok: varianty, GTIN s kontrolnou číslicou, dostupnosť a zľava mimo platnosti', () => {
+  const item = { id: 'v1', title: 'Tričko', description: 'x', link: 'https://e.test/t', image_link: 'https://e.test/t.jpg', brand: 'B',
+    price: '20.00 EUR', sale_price: '15.00 EUR', sale_price_effective_date: '2020-01-01T00:00/2020-01-02T00:00', availability: 'preorder',
+    item_group_id: 'g1', color: 'Čierna', size: 'M', gtin: '4006381333931', gender: 'Female', age_group: 'adult', condition: 'used_good' };
+  const r = toOpenAI(item, { sellerName: 'S', returnDays: 0 });
+  assert.equal(r.sale_price, undefined, 'zľava už neplatí');
+  assert.equal(r.group_id, 'g1');
+  assert.equal(r.listing_has_variations, true);
+  assert.deepEqual(r.variant_dict, { color: 'Čierna', size: 'M' });
+  assert.equal(r.gtin, '4006381333931');
+  assert.equal(toOpenAI({ ...item, gtin: '4006381333932' }, {}).gtin, undefined, 'zlá kontrolná číslica');
+  assert.equal(r.gender, 'female');
+  assert.equal(r.condition, 'used');
+  assert.equal(r.accepts_returns, undefined);
+  const norm = applyRules(item, [], 'chatgpt').item;
+  assert.equal(norm.availability, 'pre_order');
+  assert.equal(applyRules({ ...item, availability: 'in stock' }, [], 'chatgpt').item.availability, 'in_stock');
+  assert.equal(toOpenAI({ ...item, item_group_id: 'v1' }, {}).group_id, undefined, 'skupina = vlastné id nie je variant');
+  assert.equal(toOpenAI({ ...item, description: '&lt;p&gt;Hračka &amp;amp; darček&lt;/p&gt;' }, {}).description, 'Hračka & darček', 'escapované HTML');
+  const cap = toOpenAI(applyRules({ id: 'c1', item_group_id: 'g2', additional_variant_attribute: 'Kapacita:5 l, Tvar: guľatý' }, [], 'chatgpt').item, {});
+  assert.deepEqual(cap.variant_dict, { kapacita: '5 l', tvar: 'guľatý' });
+  assert.ok(checkItem({ id: 'c2', item_group_id: 'g2' }, 'chatgpt').warnings.some((w) => /variant_dict/.test(w)));
+  const bare = toOpenAI({ id: 'c2', item_group_id: 'g2' }, {});
+  assert.equal(bare.group_id, 'g2');
+  assert.equal(bare.listing_has_variations, undefined, 'bez vlastností nie je deklarovaný ako variant');
 });
 await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil ostáva bez grafiky', async () => {
   const proj = projects.create({ name: 'Akcie', slug: 'akcie-test', source_url: `${base}/feed.xml`, config: {

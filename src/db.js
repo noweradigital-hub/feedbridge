@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { config, defaultProjectConfig } from './config.js';
 import { normalizeBrand, normalizeElements, PRESETS } from './badge.js';
 import { normalizeCampaigns, normalizeOverrides } from './campaigns.js';
+import { normalizeOpenAI } from './feed/openai.js';
 
 const db = new DatabaseSync(config.dbFile);
 db.exec(`
@@ -73,20 +74,20 @@ function rowToProject(r) {
 }
 
 /**
- * Exportné profily: každý je jeden výstupný feed s vlastnou URL (/feeds/<slug>.xml).
+ * Exportné profily: každý je jeden výstupný feed s vlastnou URL (/feeds/<slug>.xml, ChatGPT <slug>.jsonl.gz).
  * Projekt bez profilov (staršie verzie) dostane predvolený so slugom projektu, takže
  * pôvodná URL feedu ostáva v platnosti.
  */
 export function normalizeProfiles(list, projectSlug) {
-  const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => ({
+  const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => Object.assign({
     id: typeof p.id === 'string' && /^[a-z0-9]{1,16}$/.test(p.id) ? p.id : crypto.randomBytes(4).toString('hex'),
     slug: p.slug,
     name: String(p.name || p.slug).trim().slice(0, 80) || p.slug,
-    channel: p.channel === 'google' ? 'google' : 'meta',
+    channel: ['google', 'chatgpt'].includes(p.channel) ? p.channel : 'meta',
     enabled: p.enabled !== false,
     imageMode: ['original', 'clean', 'percent'].includes(p.imageMode) ? p.imageMode : 'project', // Google používa vždy pôvodnú fotku, pozri imageModeOf
     rules: Array.isArray(p.rules) ? p.rules : [],
-  }));
+  }, p.channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {})); // predajca a vrátenie tovaru pre OpenAI
   if (!out.length && projectSlug) {
     out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', rules: [] });
   }

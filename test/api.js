@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 
@@ -186,6 +187,42 @@ await t('profily: pridanie Google profilu, vlastný feed, zamknutý slug, jedine
   assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: p })).status, 200);
   assert.equal((await fetch(base + '/feeds/demo-google.xml')).status, 404);
   assert.equal((await fetch(base + '/feeds/demo.xml')).status, 200);
+  proj = await (await api('/projects/' + proj.id)).json();
+});
+
+await t('ChatGPT profil: jsonl.gz na stiahnutie, výstup pre galériu, zmena kanála zmaže starý súbor', async () => {
+  let cur = await (await api('/projects/' + proj.id)).json();
+  cur.config.profiles.push({ slug: 'demo-gpt', name: 'ChatGPT', channel: 'chatgpt', openai: { sellerName: 'Demo s.r.o.' }, rules: [] });
+  let r = await api('/projects/' + proj.id, { method: 'PUT', body: cur });
+  assert.equal(r.status, 200);
+  cur = await r.json();
+  const gp = cur.config.profiles.find((x) => x.slug === 'demo-gpt');
+  assert.match(gp.feed_url, /\/feeds\/demo-gpt\.jsonl\.gz$/);
+  assert.equal(gp.openai.sellerName, 'Demo s.r.o.');
+  assert.equal(gp.openai.returnDays, 14);
+  await api(`/projects/${proj.id}/run`, { method: 'POST' });
+  let p;
+  for (let i = 0; i < 60; i++) { p = await (await api('/projects/' + proj.id)).json(); if (!p.running && p.last_summary?.profiles?.['demo-gpt']) break; await new Promise((x) => setTimeout(x, 100)); }
+  assert.equal(p.last_status, 'ok', JSON.stringify(p.last_summary));
+  const res = await fetch(base + '/feeds/demo-gpt.jsonl.gz');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'application/gzip');
+  assert.match(res.headers.get('content-disposition'), /attachment; filename="demo-gpt\.jsonl\.gz"/);
+  const row = JSON.parse(zlib.gunzipSync(Buffer.from(await res.arrayBuffer())).toString('utf8').trim());
+  assert.equal(row.item_id, '1');
+  assert.equal(row.availability, 'in_stock');
+  assert.equal(row.seller_name, 'Demo s.r.o.');
+  assert.equal((await fetch(base + '/feeds/demo-gpt.xml')).status, 404);
+  const out = await (await api(`/projects/${proj.id}/output?profile=demo-gpt`)).json();
+  assert.equal(out.items[0].id, '1');
+  // prepnutie kanála na Metu: jsonl.gz zmizne, feed bude XML
+  const sw = structuredClone(p); sw.config.profiles.find((x) => x.slug === 'demo-gpt').channel = 'meta';
+  r = await api('/projects/' + proj.id, { method: 'PUT', body: sw });
+  assert.equal(r.status, 200);
+  assert.equal((await fetch(base + '/feeds/demo-gpt.jsonl.gz')).status, 404);
+  const back = await r.json();
+  back.config.profiles = back.config.profiles.filter((x) => x.slug !== 'demo-gpt');
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: back })).status, 200);
   proj = await (await api('/projects/' + proj.id)).json();
 });
 
