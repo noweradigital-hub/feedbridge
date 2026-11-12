@@ -144,7 +144,9 @@ function render() {
     ...p.config.profiles.filter((pr) => pr.feed_url).map((pr) => h('div', { class: 'feedurl' },
       h('span', { class: 'tag' }, CHANNELS[pr.channel]), h('span', { class: 'muted' }, `${pr.name}:`), h('code', {}, pr.feed_url),
       h('button', { class: 'btn small', onclick: () => { navigator.clipboard.writeText(pr.feed_url); toast('Skopírované'); } }, 'Kopírovať'),
-      pr.has_feed ? h('a', { class: 'btn small', href: pr.feed_url, download: pr.feed_url.split('/').pop() }, 'Stiahnuť') : null,
+      pr.has_feed ? h('a', { class: 'btn small', href: pr.feed_url, download: pr.feed_url.split('/').pop() }, pr.channel === 'chatgpt' ? 'Stiahnuť .jsonl.gz' : 'Stiahnuť') : null,
+      pr.has_feed && pr.channel === 'chatgpt' ? h('button', { class: 'btn small', onclick: () => { navigator.clipboard.writeText(pr.feed_url.replace(/\.jsonl\.gz$/, '.csv')); toast('URL CSV skopírovaná'); } }, 'Kopírovať URL CSV') : null,
+      pr.has_feed && pr.channel === 'chatgpt' ? h('a', { class: 'btn small', href: pr.feed_url.replace(/\.jsonl\.gz$/, '.csv'), download: pr.feed_url.split('/').pop().replace(/\.jsonl\.gz$/, '.csv') }, 'Stiahnuť CSV') : null,
       pr.enabled === false ? h('span', { class: 'tag warning' }, 'vypnutý') : null,
       pr.has_feed ? null : h('span', { class: 'muted' }, '(feed ešte nebol vygenerovaný)'))),
     h('div', { class: 'tabs' }, Object.entries(tabs).map(([k, t]) =>
@@ -373,8 +375,9 @@ function tabProfiles() {
             textInput('Web predajcu', o, 'sellerUrl', { type: 'url', placeholder: 'https://' }),
             textInput('Podmienky vrátenia tovaru (URL)', o, 'returnPolicy', { type: 'url', placeholder: 'https://' }),
             textInput('Lehota na vrátenie (dni, 0 = nevracia sa)', o, 'returnDays', { type: 'number' }),
-            textInput('Krajina obchodu (ISO kód)', o, 'country', { placeholder: 'SK' })),
-          h('p', { class: 'muted' }, 'OpenAI si feed nesťahuje: súbor .jsonl.gz sa nahráva k nim cez SFTP, ktorý dostaneš po schválení na chatgpt.com/merchants. Dovtedy ho stiahneš tlačidlom pri URL feedu. ChatGPT nákupy sú zatiaľ spustené len v USA.')) : null,
+            textInput('Krajina obchodu (ISO kód)', o, 'country', { placeholder: 'SK' }),
+            h('label', { class: 'f check' }, h('input', { type: 'checkbox', checked: o.ads !== false, onchange: (e) => { o.ads = e.target.checked; markDirty(); } }), 'Aj do reklám v ChatGPT (is_ads_eligible)')),
+          h('p', { class: 'muted' }, 'Feed je v dvoch formátoch: .jsonl.gz pre produktový feed cez SFTP (po schválení na chatgpt.com/merchants) a CSV pre Ads Manager (rovnaká URL s koncovkou .csv). Oba stiahneš tlačidlami pri URL feedu. ChatGPT nákupy aj reklamy sú zatiaľ len v USA.')) : null,
         h('details', { open: pr.rules.length > 0 },
           h('summary', {}, `Pravidlá len pre tento profil (${pr.rules.length})`),
           rulesEditor(pr.rules, 'Žiadne vlastné pravidlá. Platia len pravidlá projektu.')));

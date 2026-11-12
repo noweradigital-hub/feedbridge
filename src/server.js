@@ -7,7 +7,8 @@ import { config } from './config.js';
 import { projects, runs, versions, validSlug, normalizeProfiles, normalizeConfig } from './db.js';
 import { triggerRun, isRunning, startScheduler } from './runner.js';
 import { previewProject, imageModeOf, feedFileOf, feedNameOf } from './feed/pipeline.js';
-import { readOpenAIFeed } from './feed/openai.js';
+import { readOpenAIFeed, rowsToCsv } from './feed/openai.js';
+import zlib from 'node:zlib';
 import { parseFeed } from './feed/parse.js';
 import { fetchSource } from './feed/pipeline.js';
 import { renderPreview, validAssetName, originalJpeg, imagePlan } from './images.js';
@@ -24,6 +25,18 @@ app.use(express.json({ limit: '2mb' }));
 
 // ---------------------------------------------------------------- verejné časti (Meta si sťahuje feed a obrázky)
 app.get('/feeds/:file', (req, res) => {
+  // ChatGPT feed aj ako CSV (Ads Manager), prevedený zo zverejneného jsonl.gz
+  const c = /^([a-z0-9-]+)\.(csv|csv\.gz)$/.exec(req.params.file);
+  if (c) {
+    const src = path.join(config.feedsDir, `${c[1]}.jsonl.gz`);
+    if (!fs.existsSync(src)) return res.status(404).send('Feed ešte nebol vygenerovaný');
+    const csv = Buffer.from(rowsToCsv(readOpenAIFeed(fs.readFileSync(src))), 'utf8');
+    res.set('Cache-Control', 'public, max-age=300');
+    if (c[2] === 'csv') { res.set('Content-Type', 'text/csv; charset=utf-8'); return res.send(csv); }
+    res.set('Content-Type', 'application/gzip');
+    res.set('Content-Disposition', `attachment; filename="${c[1]}.csv.gz"`);
+    return res.send(zlib.gzipSync(csv));
+  }
   const m = /^([a-z0-9-]+)\.(xml|jsonl\.gz)$/.exec(req.params.file);
   if (!m) return res.status(404).end();
   const file = path.join(config.feedsDir, `${m[1]}.${m[2]}`);

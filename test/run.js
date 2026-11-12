@@ -17,7 +17,7 @@ process.env.REMBG_RETRY_MS = '50';
 const { projects } = await import('../src/db.js');
 const { runProject } = await import('../src/feed/pipeline.js');
 const { parseFeed } = await import('../src/feed/parse.js');
-const { readOpenAIFeed, toOpenAI } = await import('../src/feed/openai.js');
+const { readOpenAIFeed, toOpenAI, rowsToCsv } = await import('../src/feed/openai.js');
 const { applyRules, renderTemplate, parsePrice, checkItem, testWhen, fieldValue } = await import('../src/feed/rules.js');
 const { ensureImage, pruneImages, pruneCache, renderPreview, fetchCached, originalJpeg } = await import('../src/images.js');
 const { safeFetch, isPublicAddress } = await import('../src/net.js');
@@ -856,7 +856,7 @@ await t('ChatGPT profil: jsonl.gz podľa OpenAI, pôvodné fotky, bez predajcu s
   fs.rmSync(path.join(tmp, 'feeds', 'gpt-test.xml'), { force: true });
 
   const proj = mk({ sellerName: 'Hračkáreň s.r.o.', returnPolicy: 'https://example.test/vratenie', returnDays: 30, country: 'sk', sellerUrl: 'nie-url' });
-  assert.deepEqual(proj.config.profiles[1].openai, { sellerName: 'Hračkáreň s.r.o.', sellerUrl: '', returnPolicy: 'https://example.test/vratenie', returnDays: 30, country: 'SK' });
+  assert.deepEqual(proj.config.profiles[1].openai, { sellerName: 'Hračkáreň s.r.o.', sellerUrl: '', returnPolicy: 'https://example.test/vratenie', returnDays: 30, country: 'SK', ads: true });
   const s = await runProject(proj, () => {});
   assert.equal(s.error, undefined, JSON.stringify(s));
   const rows = readOpenAIFeed(fs.readFileSync(path.join(tmp, 'feeds', 'gpt-test-chatgpt.jsonl.gz')));
@@ -875,6 +875,7 @@ await t('ChatGPT profil: jsonl.gz podľa OpenAI, pôvodné fotky, bez predajcu s
   assert.equal(r1.condition, 'new');
   assert.equal(r1.is_eligible_search, true);
   assert.equal(r1.is_eligible_checkout, false);
+  assert.equal(r1.is_ads_eligible, true);
   assert.equal(r1.accepts_returns, true);
   assert.equal(r1.return_deadline_in_days, 30);
   assert.deepEqual(r1.target_countries, ['SK']);
@@ -920,6 +921,11 @@ await t('OpenAI riadok: varianty, GTIN s kontrolnou číslicou, dostupnosť a z�
   const cap = toOpenAI(applyRules({ id: 'c1', item_group_id: 'g2', additional_variant_attribute: 'Kapacita:5 l, Tvar: guľatý' }, [], 'chatgpt').item, {});
   assert.deepEqual(cap.variant_dict, { kapacita: '5 l', tvar: 'guľatý' });
   assert.ok(checkItem({ id: 'c2', item_group_id: 'g2' }, 'chatgpt').warnings.some((w) => /variant_dict/.test(w)));
+  const csv = rowsToCsv([{ item_id: 'a', title: 'Deka, "veľká"', additional_image_urls: ['https://e.test/a,b.jpg', 'https://e.test/c.jpg'], variant_dict: { color: 'Čierna' }, is_eligible_search: true }]).split('\r\n');
+  assert.equal(csv[0].split(',')[0], 'item_id');
+  assert.ok(csv[1].includes('"Deka, ""veľká"""'), csv[1]);
+  assert.ok(csv[1].includes('"https://e.test/a%2Cb.jpg,https://e.test/c.jpg"'), csv[1]);
+  assert.ok(csv[1].includes('"{""color"":""Čierna""}"'), csv[1]);
   const bare = toOpenAI({ id: 'c2', item_group_id: 'g2' }, {});
   assert.equal(bare.group_id, 'g2');
   assert.equal(bare.listing_has_variations, undefined, 'bez vlastností nie je deklarovaný ako variant');

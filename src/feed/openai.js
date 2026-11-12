@@ -55,6 +55,7 @@ export function normalizeOpenAI(o = {}) {
     sellerUrl: url(o.sellerUrl),
     returnPolicy: url(o.returnPolicy),
     returnDays: Number.isInteger(days) && days >= 0 && days <= 365 ? days : 14,
+    ads: o.ads !== false, // is_ads_eligible: produkty smú ísť aj do reklám v ChatGPT (Ads Manager)
     country: /^[A-Za-z]{2}$/.test(String(o.country || '').trim()) ? String(o.country).trim().toUpperCase() : 'SK',
   };
 }
@@ -106,6 +107,7 @@ export function toOpenAI(item, settings, at = Date.now()) {
   if (s.sellerUrl) out.seller_url = s.sellerUrl;
   out.is_eligible_search = true;
   out.is_eligible_checkout = false; // platba v ChatGPT je samostatná integrácia; nákup sa dokončí na e-shope
+  out.is_ads_eligible = s.ads;
   if (s.returnDays > 0) {
     out.accepts_returns = true;
     out.return_deadline_in_days = s.returnDays;
@@ -120,6 +122,31 @@ export function toOpenAI(item, settings, at = Date.now()) {
 export function buildOpenAIFeed(items, settings, at = Date.now()) {
   const lines = items.map((it) => JSON.stringify(toOpenAI(it, settings, at)));
   return zlib.gzipSync(Buffer.from(lines.join('\n') + (lines.length ? '\n' : ''), 'utf8'));
+}
+
+// Poradie stĺpcov v CSV: ako v príklade OpenAI pre Ads Manager, za nimi ostatné polia
+const CSV_ORDER = ['item_id', 'title', 'description', 'url', 'brand', 'image_url', 'price', 'availability', 'seller_name', 'seller_url',
+  'return_policy', 'target_countries', 'store_country', 'is_eligible_search', 'is_eligible_checkout', 'is_ads_eligible',
+  'sale_price', 'additional_image_urls', 'condition', 'gtin', 'mpn', 'product_category', 'color', 'size', 'material', 'gender', 'age_group',
+  'group_id', 'listing_has_variations', 'variant_dict', 'accepts_returns', 'return_deadline_in_days'];
+
+function csvCell(v, key) {
+  let s;
+  if (v === undefined || v === null) s = '';
+  else if (Array.isArray(v)) s = key === 'additional_image_urls' ? v.map((u) => String(u).replace(/,/g, '%2C')).join(',') : v.join(',');
+  else if (typeof v === 'object') s = JSON.stringify(v); // objekty v CSV bunke ako JSON (spec)
+  else s = String(v); // boolean -> "true"/"false"
+  return /[",\r\n]|^\s|\s$/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Ten istý feed ako CSV (UTF-8, čiarka, hlavička): Ads Manager v ChatGPT berie CSV. */
+export function rowsToCsv(rows) {
+  const extra = [...new Set(rows.flatMap((r) => Object.keys(r)))].filter((k) => !CSV_ORDER.includes(k));
+  const present = new Set(rows.flatMap((r) => Object.keys(r)));
+  const cols = [...CSV_ORDER.filter((k) => present.has(k) || CSV_ORDER.indexOf(k) < 16), ...extra];
+  const lines = [cols.join(',')];
+  for (const r of rows) lines.push(cols.map((k) => csvCell(r[k], k)).join(','));
+  return lines.join('\r\n') + '\r\n';
 }
 
 /** Riadky zverejneného jsonl.gz súboru (pre poistku poklesu a záložku Výstup). */

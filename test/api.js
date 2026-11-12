@@ -213,6 +213,18 @@ await t('ChatGPT profil: jsonl.gz na stiahnutie, výstup pre galériu, zmena kan
   assert.equal(row.availability, 'in_stock');
   assert.equal(row.seller_name, 'Demo s.r.o.');
   assert.equal((await fetch(base + '/feeds/demo-gpt.xml')).status, 404);
+  const csvRes = await fetch(base + '/feeds/demo-gpt.csv');
+  assert.equal(csvRes.status, 200);
+  assert.match(csvRes.headers.get('content-type'), /^text\/csv/);
+  const csv = (await csvRes.text()).split('\r\n');
+  assert.equal(csv[0].split(',').slice(0, 16).join(','), 'item_id,title,description,url,brand,image_url,price,availability,seller_name,seller_url,return_policy,target_countries,store_country,is_eligible_search,is_eligible_checkout,is_ads_eligible');
+  const cells = csv[1].split(',');
+  assert.equal(cells[0], '1');
+  assert.equal(cells[8], '"Demo s.r.o."' === cells[8] ? cells[8] : 'Demo s.r.o.');
+  assert.equal(cells[15], 'true');
+  const gzCsv = await fetch(base + '/feeds/demo-gpt.csv.gz');
+  assert.match(zlib.gunzipSync(Buffer.from(await gzCsv.arrayBuffer())).toString('utf8'), /^item_id,title,/);
+  assert.equal((await fetch(base + '/feeds/demo.csv')).status, 404, 'CSV len pre ChatGPT profil');
   const out = await (await api(`/projects/${proj.id}/output?profile=demo-gpt`)).json();
   assert.equal(out.items[0].id, '1');
   // prepnutie kanála na Metu: jsonl.gz zmizne, feed bude XML
