@@ -89,14 +89,17 @@ export const ELEMENT_DEFAULTS = {
   price: { show: true, bg: 'primary', text: 'white' }, // nová cena
   old: { show: true, bg: 'primary-dark', text: 'white' }, // pôvodná cena, prečiarknutá
   discount: { show: true, bg: '#f03636', text: 'white' }, // pilulka so zľavou
-  campaign: { show: true }, // štítok alebo názov akcie; farbu určuje akcia
+  campaign: { show: true, position: 'auto' }, // štítok alebo názov akcie; farbu určuje akcia
 };
+/** Umiestnenie štítku akcie (Layout 1). auto = vľavo hore, bez cien vľavo dole (ako návrh). */
+export const TAG_POSITIONS = ['auto', 'top-left', 'top-right', 'bottom-left', 'bottom-right'];
 export function normalizeElements(el) {
   const out = {};
   for (const [k, d] of Object.entries(ELEMENT_DEFAULTS)) {
     const v = el?.[k] || {};
     out[k] = { show: v.show !== false };
     if ('bg' in d) { out[k].bg = typeof v.bg === 'string' && v.bg ? v.bg : d.bg; out[k].text = typeof v.text === 'string' && v.text ? v.text : d.text; }
+    if ('position' in d) out[k].position = TAG_POSITIONS.includes(v.position) ? v.position : d.position;
   }
   return out;
 }
@@ -145,7 +148,8 @@ function pair(el, brand, notes, what, min = 3) {
 /**
  * Rozhodne, čo sa na obrázok položky nakreslí, a pripraví všetko, čo určuje vzhľad.
  * Výsledok ide celý do kľúča cache: zmena ceny, farby či textu = nový obrázok.
- * ctx = { campaign: {name,color,textColor}|null, layout: prepis layoutu, hidePrices: bool, hidePill: bool (len štítok akcie) }
+ * ctx = { campaign: {name,color,textColor}|null, layout: prepis layoutu, hidePrices: bool, hidePill: bool (len štítok akcie),
+ *         tagPosition: prepis umiestnenia štítku z profilu }
  * (akcia a nastavenie produktu, pozri campaigns.js). Vráti null, ak sa nemá kresliť nič.
  */
 export function resolveBadge(item, badgeCfg, brandCfg, at = Date.now(), ctx = {}) {
@@ -175,6 +179,7 @@ export function resolveBadge(item, badgeCfg, brandCfg, at = Date.now(), ctx = {}
     const showCampaign = !!campaign && el.campaign.show;
     if (!showPrice && !showPill && !showCampaign) return null;
     const campBg = showCampaign ? (isHex(campaign.color) ? campaign.color.toLowerCase() : '#000000') : null;
+    const tagPos = TAG_POSITIONS.includes(ctx.tagPosition) && ctx.tagPosition !== 'auto' ? ctx.tagPosition : el.campaign.position;
     return {
       v: LAYOUT_VERSION,
       preset,
@@ -191,6 +196,7 @@ export function resolveBadge(item, badgeCfg, brandCfg, at = Date.now(), ctx = {}
         bg: campBg,
         // veľký tučný nápis: svetlý text ostáva aj na sýtych farbách (oranžová z návrhu), tmavý až na naozaj svetlom podklade
         fg: isHex(campaign.textColor) ? campaign.textColor.toLowerCase() : contrast('#f1f1f1', campBg) >= 2 ? '#f1f1f1' : onColor(campBg),
+        ...(tagPos !== 'auto' ? { position: tagPos } : {}), // 'auto' nemení kľúč cache: staré obrázky sa neprerábajú
       } : null,
       notes,
     };
@@ -456,13 +462,25 @@ function layout(spec, W, H) {
     const t = fittedText(upper(c.name), { size: 87.7 * k, weight: 700, font, maxWidth });
     if (t) out += `<path d="${t.run.d(textX, H - 100 * u)}" fill="${c.fg}"/>`;
   } else if (c) {
-    // štítok akcie: vľavo hore; keď nie sú ceny, sadne si na ich miesto vľavo dole (4. rám návrhu)
+    // štítok akcie: predvolene vľavo hore; keď nie sú ceny, sadne si na ich miesto vľavo dole (4. rám návrhu).
+    // Zvolené umiestnenie sa vyhne zľave (vpravo hore) aj cenám (vľavo dole): štítok si sadne pod/nad ne.
+    const pos = c.position || (now ? 'top-left' : 'bottom-left');
+    const isTop = pos.startsWith('top'), isRight = pos.endsWith('right');
     const padX = 42 * k;
     const free = W - insetL - insetR - 2 * padX;
-    const t = fittedText(upper(c.name), { size: 63.4 * k, weight: 700, font, maxWidth: now ? free - (pill ? pill.w + 30 * u : 0) : free });
+    const sameSideAsPrices = (L.prices === 'left') === !isRight;
+    const abovePrices = !isTop && now && sameSideAsPrices; // dole na strane cien: štítok nad ne
+    const besidePrices = !isTop && now && !sameSideAsPrices ? stackW + 40 * u : 0; // dole na druhej strane: vedľa cien
+    const besidePill = isTop && pill && !isRight ? pill.w + 30 * u : 0;
+    const t = fittedText(upper(c.name), { size: 63.4 * k, weight: 700, font, maxWidth: free - besidePill - besidePrices });
     if (t) {
       const tag = textBox(t.text, { size: t.size, weight: 700, padX, padY: 0, height: 146 * k, radius: 30 * k, font, bg: c.bg, fg: c.fg });
-      out += tag.draw(insetL, now ? top : H - 39 * u - tag.h);
+      const x = isRight ? W - insetR - tag.w : insetL;
+      let y = isTop ? top : H - 39 * u - tag.h;
+      if (isTop && isRight && pill) y = top + pill.h + 24 * u; // pod zľavu
+      if (abovePrices) y = (old ? nowY - 22 * u - old.h : nowY) - 24 * u - tag.h;
+      else if (!isTop && now) y = nowY + now.h - tag.h; // vedľa cien: rovnaká spodná hrana ako nová cena
+      out += tag.draw(x, y);
     }
   }
 

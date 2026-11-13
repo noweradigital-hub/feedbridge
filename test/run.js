@@ -822,6 +822,22 @@ await t('layouty sa vykreslia na správne miesta (štvorec aj 7:8) a dlhý názo
   const l1 = renderBadge(longSpec('layout-1'), W, W);
   assert.ok(await blueInside(l1, 0, 0, W, 120) > 50, 'L1: štítok s názvom sa nakreslil');
   assert.equal(await blueInside(l1, W - 190, 0, W, 120), 0, 'L1: štítok nezasahuje do zľavy vpravo hore');
+  // umiestnenie štítku: 'auto' nemení spec (staré obrázky ostanú), zvolené rohy sa vyhnú zľave aj cenám
+  const tagSpec = (pos, sale = true, tagPosition) => resolveBadge(sale ? { price: '100.00 EUR', sale_price: '80.00 EUR' } : { price: '100.00 EUR' },
+    { ...layoutCfg, preset: 'layout-1', elements: { campaign: { position: pos } } }, kidvakBrand, Date.now(),
+    { campaign: { name: 'Black Friday', color: '#101010', textColor: '#0000ff' }, hidePrices: !sale, hidePill: !sale, tagPosition });
+  assert.equal(tagSpec('auto').campaign.position, undefined);
+  assert.equal(tagSpec('top-left', false).campaign.position, 'top-left');
+  assert.equal(tagSpec('auto', false, 'bottom-right').campaign.position, 'bottom-right', 'profil prebíja nastavenie obrázkov');
+  const half = W / 2;
+  assert.ok(await blueInside(renderBadge(tagSpec('top-left', false), W, W), 0, 0, half, half) > 50, 'vľavo hore');
+  assert.equal(await blueInside(renderBadge(tagSpec('top-left', false), W, W), 0, half, W, W), 0);
+  assert.ok(await blueInside(renderBadge(tagSpec('bottom-right', false), W, W), half, half, W, W) > 50, 'vpravo dole');
+  const tr = renderBadge(tagSpec('top-right'), W, W); // so zľavou: štítok pod bublinou
+  assert.ok(await blueInside(tr, half, 80, W, half) > 50, 'vpravo hore pod zľavou');
+  assert.equal(await blueInside(tr, half, 0, W, 60), 0, 'neprekrýva zľavu');
+  const bl = renderBadge(tagSpec('bottom-left'), W, W); // s cenami vľavo dole: štítok nad nimi
+  assert.ok(await blueInside(bl, 0, half, half, W - 150) > 50, 'vľavo dole nad cenami');
 });
 await t('pomer strán plátna: štvorec, 4:5 a 7:8', async () => {
   const s = { ...imgCfg, base: 'photo', applyToAll: true, badge: { enabled: false } };

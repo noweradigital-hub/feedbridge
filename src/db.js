@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import { config, defaultProjectConfig } from './config.js';
-import { normalizeBrand, normalizeElements, PRESETS } from './badge.js';
+import { normalizeBrand, normalizeElements, PRESETS, TAG_POSITIONS } from './badge.js';
 import { normalizeCampaigns, normalizeOverrides } from './campaigns.js';
 import { normalizeOpenAI } from './feed/openai.js';
 
@@ -103,6 +103,7 @@ export function normalizeProfiles(list, projectSlug) {
       imageMode: profileImageMode(p, channel),
       imageModeVersion: 2,
       campaign: typeof p.campaign === 'string' && /^[a-z0-9-]{1,40}$/.test(p.campaign) ? p.campaign : '', // akcia pre všetky produkty profilu
+      tagPosition: TAG_POSITIONS.includes(p.tagPosition) ? p.tagPosition : 'auto', // auto = podľa záložky Obrázky
       rules: Array.isArray(p.rules) ? p.rules : [],
     }, channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {}); // predajca a vrátenie tovaru pre OpenAI
   });

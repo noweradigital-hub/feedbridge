@@ -9,6 +9,7 @@ const OPS = { eq: 'sa rovná', neq: 'nerovná sa', contains: 'obsahuje', ncontai
   empty: 'je prázdne', nempty: 'nie je prázdne', gt: '>', lt: '<', gte: '≥', lte: '≤', in: 'je jedno z (a,b,c)' };
 
 const CHANNELS = { meta: 'Meta', google: 'Google', chatgpt: 'ChatGPT' };
+const TAG_POSITIONS = { auto: 'Automaticky (vľavo hore, bez cien vľavo dole)', 'top-left': 'Vľavo hore', 'top-right': 'Vpravo hore', 'bottom-left': 'Vľavo dole', 'bottom-right': 'Vpravo dole' };
 const LAYOUT_NAMES = { 'layout-1': 'Layout 1', 'layout-2': 'Layout 2', 'layout-3': 'Layout 3' };
 
 const RULE_TYPES = {
@@ -366,7 +367,9 @@ function tabProfiles() {
           selectInput('Kanál', pr, 'channel', CHANNELS, () => render()),
           selectInput('Vizuál obrázkov', pr, 'imageMode', { project: 'S cenami a akciami (záložka Obrázky)', percent: 'Len akcia a % zľavy, bez cien', campaign: 'Len štítok akcie', clean: 'Upravený formát, bez cien a akcií', original: 'Pôvodné fotky z e-shopu' }, () => { pr.imageModeVersion = 2; render(); }),
           ['clean', 'original'].includes(pr.imageMode) ? null : selectInput('Akcia pre všetky produkty profilu', pr, 'campaign',
-            { '': 'Podľa nastavenia produktov a akcií', ...Object.fromEntries(p.config.campaigns.map((c) => [c.id, c.name])) })),
+            { '': 'Podľa nastavenia produktov a akcií', ...Object.fromEntries(p.config.campaigns.map((c) => [c.id, c.name])) }),
+          ['clean', 'original'].includes(pr.imageMode) ? null : selectInput('Umiestnenie štítku akcie (Layout 1)', pr, 'tagPosition',
+            { ...TAG_POSITIONS, auto: 'Podľa záložky Obrázky' })),
         google && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'tag warning', style: 'white-space:normal;line-height:1.4;padding:8px 12px;border-radius:10px' },
           'Google Merchant Center zamieta hlavné obrázky s promo textom (ceny, zľavy, štítky akcie) a produkty potom nezobrazí. Bezpečný je „Upravený formát“ alebo pôvodné fotky.') : null,
         chatgpt && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'muted' }, 'OpenAI pravidlá k textu na obrázkoch nezverejnil, over si to pri schvaľovaní.') : null,
@@ -530,14 +533,18 @@ function tabImages() {
       layoutPreset ? h('div', {},
         h('p', { class: 'muted', style: 'margin-top:12px' }, 'Prvky šablóny. Farby vychádzajú z návrhu; „Hlavná farba značky“ sa mení spolu so značkou hore. Farbu štítku akcie a prechodu určuje akcia (záložka Akcie).'),
         h('table', { class: 'elements' },
-          h('thead', {}, h('tr', {}, ['Prvok', 'Zobraziť', 'Podklad', 'Text'].map((t) => h('th', {}, t)))),
+          h('thead', {}, h('tr', {}, ['Prvok', 'Zobraziť', 'Podklad', 'Text', 'Umiestnenie'].map((t) => h('th', {}, t)))),
           h('tbody', {}, [['price', 'Nová cena'], ['old', 'Pôvodná cena (prečiarknutá)'], ['discount', 'Zľava v %'], ['campaign', 'Akcia (štítok alebo názov)']].map(([key, label]) => {
             const el = b.elements[key];
             return h('tr', {},
               h('td', {}, label),
               h('td', {}, h('input', { type: 'checkbox', checked: el.show !== false, onchange: (e) => { el.show = e.target.checked; markDirty(); live(); } })),
               h('td', {}, 'bg' in el ? colorToken('', el, 'bg', { allowAuto: false }) : h('span', { class: 'muted' }, 'podľa akcie')),
-              h('td', {}, 'text' in el ? colorToken('', el, 'text') : h('span', { class: 'muted' }, 'podľa akcie')));
+              h('td', {}, 'text' in el ? colorToken('', el, 'text') : h('span', { class: 'muted' }, 'podľa akcie')),
+              h('td', {}, key === 'campaign' && b.preset === 'layout-1'
+                ? h('select', { onchange: (e) => { el.position = e.target.value; markDirty(); live(); } },
+                  Object.entries(TAG_POSITIONS).map(([v, t]) => h('option', { value: v, selected: (el.position || 'auto') === v }, t)))
+                : null));
           })))) : null,
       h('details', {},
         h('summary', {}, 'Pokročilé: z ktorého poľa je prečiarknutá cena a pre ktoré produkty'),

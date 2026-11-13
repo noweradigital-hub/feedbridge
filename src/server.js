@@ -329,7 +329,7 @@ app.post('/api/projects/:id/preview-image', wrap(async (req, res) => {
   const prof = body.profile ? cfg.profiles.find((x) => x.slug === body.profile) : null;
   const plan = resolveCampaign(item, src, cfg, at, prof?.campaign || '');
   const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean' && mode !== 'original', campaign: plan.campaign, layout: plan.layout,
-    hidePrices: plan.hidePrices || mode === 'percent' || mode === 'campaign', hidePill: mode === 'campaign' };
+    hidePrices: plan.hidePrices || mode === 'percent' || mode === 'campaign', hidePill: mode === 'campaign', tagPosition: prof?.tagPosition };
   const { jpg, badge, unchanged } = await renderPreview(url, item, cfg.images, ctx);
   res.set('X-Unchanged', unchanged ? '1' : '0');
   res.set('Content-Type', 'image/jpeg');
@@ -458,7 +458,7 @@ app.post('/api/projects/:id/versions/:vid/restore', wrap((req, res) => {
   const byId = new Map((old.profiles || []).map((pr) => [pr.id, pr]));
   const profiles = p.config.profiles.map((pr) => {
     const o = byId.get(pr.id);
-    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, imageModeVersion: o.imageModeVersion, campaign: o.campaign, rules: o.rules } : pr;
+    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, imageModeVersion: o.imageModeVersion, campaign: o.campaign, tagPosition: o.tagPosition, rules: o.rules } : pr;
   });
   const restored = projects.update(p.id, { ...p, config: { ...old, profiles } });
   res.json(publicProject(restored));

@@ -161,7 +161,7 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
         const plan = mode === 'clean' ? null : resolveCampaign(item, sources.get(item), cfg, at, profile.campaign);
         if (plan?.campaign) ps.campaigns[plan.campaign.id] = (ps.campaigns[plan.campaign.id] || 0) + 1;
         const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout,
-          hidePrices: plan?.hidePrices || mode === 'percent' || mode === 'campaign', hidePill: mode === 'campaign' };
+          hidePrices: plan?.hidePrices || mode === 'percent' || mode === 'campaign', hidePill: mode === 'campaign', tagPosition: profile.tagPosition };
         const { file: out, cached } = await ensureImage(project.slug, url, item, img, ctx);
         if (!out) { ps.images.skipped++; return; } // bez badge ostáva pôvodná fotka
         used.add(out);

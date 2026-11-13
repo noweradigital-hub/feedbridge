@@ -514,7 +514,7 @@ async function render(orig, item, s, bgSource, badge) {
  */
 export function imagePlan(item, s, ctx = {}) {
   const badge = ctx.overlay === false ? null
-    : resolveBadge(item, s.badge, ctx.brand, ctx.at, { campaign: ctx.campaign, layout: ctx.layout, hidePrices: ctx.hidePrices, hidePill: ctx.hidePill });
+    : resolveBadge(item, s.badge, ctx.brand, ctx.at, { campaign: ctx.campaign, layout: ctx.layout, hidePrices: ctx.hidePrices, hidePill: ctx.hidePill, tagPosition: ctx.tagPosition });
   return { badge, generate: usesBackground(s) || !!badge || !!s.applyToAll };
 }
 
