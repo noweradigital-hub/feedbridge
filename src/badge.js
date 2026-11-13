@@ -145,7 +145,7 @@ function pair(el, brand, notes, what, min = 3) {
 /**
  * Rozhodne, čo sa na obrázok položky nakreslí, a pripraví všetko, čo určuje vzhľad.
  * Výsledok ide celý do kľúča cache: zmena ceny, farby či textu = nový obrázok.
- * ctx = { campaign: {name,color,textColor}|null, layout: prepis layoutu, hidePrices: bool }
+ * ctx = { campaign: {name,color,textColor}|null, layout: prepis layoutu, hidePrices: bool, hidePill: bool (len štítok akcie) }
  * (akcia a nastavenie produktu, pozri campaigns.js). Vráti null, ak sa nemá kresliť nič.
  */
 export function resolveBadge(item, badgeCfg, brandCfg, at = Date.now(), ctx = {}) {
@@ -171,7 +171,7 @@ export function resolveBadge(item, badgeCfg, brandCfg, at = Date.now(), ctx = {}
     const el = normalizeElements(b.elements);
     const showPrice = hasPrice && el.price.show && !ctx.hidePrices;
     const showOld = showPrice && onSale && el.old.show;
-    const showPill = onSale && el.discount.show;
+    const showPill = onSale && el.discount.show && !ctx.hidePill;
     const showCampaign = !!campaign && el.campaign.show;
     if (!showPrice && !showPill && !showCampaign) return null;
     const campBg = showCampaign ? (isHex(campaign.color) ? campaign.color.toLowerCase() : '#000000') : null;

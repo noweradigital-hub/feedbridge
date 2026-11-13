@@ -90,7 +90,7 @@ export const campaignActive = (c, day) => c.enabled !== false && (!c.from || day
  * (späť na "automaticky") začnú znova platiť podmienky; 'none' ich blokuje.
  * Pri podmienkach vyhráva prvá akcia v zozname, ktorej podmienky sedia.
  */
-export function resolveCampaign(item, source, cfg, at = Date.now()) {
+export function resolveCampaign(item, source, cfg, at = Date.now(), forced = '') {
   const campaigns = cfg.campaigns || [];
   const override = { ...(own(cfg.groups, source?.group) || {}), ...(own(cfg.products, source?.id) || {}) };
   const day = bratislavaDay(at);
@@ -98,7 +98,11 @@ export function resolveCampaign(item, source, cfg, at = Date.now()) {
   const ctx = { pricing: { priceField: cfg.images?.badge?.priceField, referenceField: cfg.images?.badge?.referenceField }, at };
   let campaign = null;
   let from = 'none';
-  if (override.campaign === 'none') {
+  if (forced) { // akcia profilu (napr. feed len pre Black Friday) platí pre všetky jeho produkty, v rámci dátumov akcie
+    const c = campaigns.find((x) => x.id === forced);
+    campaign = c && campaignActive(c, day) ? c : null;
+    from = 'profile';
+  } else if (override.campaign === 'none') {
     from = 'manual';
   } else if (override.campaign && override.campaign !== 'auto') {
     const c = campaigns.find((x) => x.id === override.campaign);

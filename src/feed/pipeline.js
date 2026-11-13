@@ -37,7 +37,7 @@ export const feedFileOf = (profile) => path.join(config.feedsDir, feedNameOf(pro
 export function imageModeOf(profile) {
   const meta = channelOf(profile.channel) === 'meta';
   if (!meta && profile.imageModeVersion !== 2) return 'original'; // starý záznam: kanál mal pevne pôvodnú fotku
-  if (['project', 'percent', 'clean', 'original'].includes(profile.imageMode)) return profile.imageMode;
+  if (['project', 'percent', 'campaign', 'clean', 'original'].includes(profile.imageMode)) return profile.imageMode;
   return meta ? 'project' : 'original';
 }
 
@@ -158,9 +158,10 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
       const url = fieldValue(item, 'image_link');
       if (!url) { ps.images.skipped++; return; }
       try {
-        const plan = mode === 'clean' ? null : resolveCampaign(item, sources.get(item), cfg, at);
+        const plan = mode === 'clean' ? null : resolveCampaign(item, sources.get(item), cfg, at, profile.campaign);
         if (plan?.campaign) ps.campaigns[plan.campaign.id] = (ps.campaigns[plan.campaign.id] || 0) + 1;
-        const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout, hidePrices: plan?.hidePrices || mode === 'percent' };
+        const ctx = { brand: cfg.brand, at, overlay: mode !== 'clean', campaign: plan?.campaign, layout: plan?.layout,
+          hidePrices: plan?.hidePrices || mode === 'percent' || mode === 'campaign', hidePill: mode === 'campaign' };
         const { file: out, cached } = await ensureImage(project.slug, url, item, img, ctx);
         if (!out) { ps.images.skipped++; return; } // bez badge ostáva pôvodná fotka
         used.add(out);

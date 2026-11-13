@@ -930,6 +930,33 @@ await t('OpenAI riadok: varianty, GTIN s kontrolnou číslicou, dostupnosť a z�
   assert.equal(bare.group_id, 'g2');
   assert.equal(bare.listing_has_variations, undefined, 'bez vlastností nie je deklarovaný ako variant');
 });
+await t('profil s akciou: všetky produkty dostanú len štítok akcie, bez cien a zľavy', async () => {
+  const proj = projects.create({ name: 'BF', slug: 'bf-test', source_url: `${base}/feed.xml`, config: {
+    images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },
+    profiles: [
+      { slug: 'bf-test', name: 'Meta', channel: 'meta' },
+      { slug: 'bf-test-bf', name: 'BF', channel: 'meta', imageMode: 'campaign', campaign: 'black-friday',
+        rules: [{ type: 'exclude', when: [{ field: 'id', op: 'eq', value: '003' }] }] },
+    ],
+  } });
+  assert.equal(proj.config.profiles[1].campaign, 'black-friday');
+  assert.equal(proj.config.profiles[1].imageMode, 'campaign');
+  const s = await runProject(proj, () => {});
+  assert.equal(s.error, undefined, JSON.stringify(s));
+  assert.deepEqual(s.profiles['bf-test-bf'].campaigns, { 'black-friday': 2 });
+  assert.deepEqual(s.profiles['bf-test'].campaigns, {}, 'iný profil akciu nedostane');
+  const bf = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'bf-test-bf.xml'), 'utf8')).items;
+  const meta = parseFeed(fs.readFileSync(path.join(tmp, 'feeds', 'bf-test.xml'), 'utf8')).items;
+  const byId = (list, id) => list.find((i) => i.id === id);
+  assert.match(byId(bf, '002').image_link, /\/img\/bf-test\//, 'aj produkt bez zľavy má štítok');
+  assert.notEqual(byId(bf, '001').image_link, byId(meta, '001').image_link, 'zľavnený má iný obrázok ako s cenami');
+  // obrázok zľavneného produktu je rovnaký ako pri produkte bez zľavy (len štítok, žiadna bublina ani ceny)
+  const plan = resolveBadge({ price: '29.90 EUR', sale_price: '23.92 EUR' }, { enabled: true, preset: 'layout-1' }, {}, Date.now(),
+    { campaign: { name: 'Black Friday', color: '#000000' }, hidePrices: true, hidePill: true });
+  assert.equal(plan.pill, null); assert.equal(plan.now, null); assert.equal(plan.campaign.name, 'Black Friday');
+  projects.remove(proj.id);
+  for (const f of ['bf-test', 'bf-test-bf']) fs.rmSync(path.join(tmp, 'feeds', `${f}.xml`), { force: true });
+});
 await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil ostáva bez grafiky', async () => {
   const proj = projects.create({ name: 'Akcie', slug: 'akcie-test', source_url: `${base}/feed.xml`, config: {
     images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },

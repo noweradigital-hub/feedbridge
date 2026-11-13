@@ -78,7 +78,7 @@ function rowToProject(r) {
  * Projekt bez profilov (staršie verzie) dostane predvolený so slugom projektu, takže
  * pôvodná URL feedu ostáva v platnosti.
  */
-export const IMAGE_MODES = ['project', 'percent', 'clean', 'original'];
+export const IMAGE_MODES = ['project', 'percent', 'campaign', 'clean', 'original'];
 
 /**
  * Vizuál profilu. Google a ChatGPT mali kedysi pevne pôvodnú fotku a uložené `imageMode` sa u nich
@@ -102,6 +102,7 @@ export function normalizeProfiles(list, projectSlug) {
       enabled: p.enabled !== false,
       imageMode: profileImageMode(p, channel),
       imageModeVersion: 2,
+      campaign: typeof p.campaign === 'string' && /^[a-z0-9-]{1,40}$/.test(p.campaign) ? p.campaign : '', // akcia pre všetky produkty profilu
       rules: Array.isArray(p.rules) ? p.rules : [],
     }, channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {}); // predajca a vrátenie tovaru pre OpenAI
   });
