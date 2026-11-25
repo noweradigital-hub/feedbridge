@@ -18,11 +18,23 @@ Server komunikuje cez stdio, na stdout ide iba protokol, logy idú na stderr.
 
 ## Registrácia v Claude Code
 
+Vyžaduje Node 22+ a git.
+
 ```
-claude mcp add --scope user nowera-feeds -- /Users/fredybabic/nowera-private/feedbridge/mcp.sh
+git clone https://github.com/noweradigital-hub/feedbridge.git ~/feedbridge
+cd ~/feedbridge/mcp && npm ci
+claude mcp add --scope user nowera-feeds \
+  --env FEEDS_URL=https://feeds.nwra.sk \
+  --env FEEDS_TOKEN=<tvoj-token> \
+  -- node ~/feedbridge/mcp/server.js
+claude mcp list   # nowera-feeds: ✔ Connected
 ```
 
-Wrapper `mcp.sh` načíta env a spustí `node mcp/server.js`.
+Potom reštart Claude Code (aj Code tab v desktop appke). Aktualizácia: `git -C ~/feedbridge pull && (cd ~/feedbridge/mcp && npm ci)`.
+
+## Tokeny
+
+Na serveri je `API_TOKEN` zoznam oddelený čiarkou (min. 16 znakov každý); každý človek má vlastný. Zrušenie = odobrať token zo zoznamu a nasadiť. Token otvára iba `/api`, nie admin UI.
 
 ## Bezpečnosť
 

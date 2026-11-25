@@ -17,7 +17,8 @@ export const config = {
   dbFile: path.join(DATA_DIR, 'feedbridge.db'),
   adminUser: process.env.ADMIN_USER || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || '',
-  apiToken: process.env.API_TOKEN || '', // Bearer token pre MCP nástroje (prázdny = vypnutý)
+  // Bearer tokeny pre MCP nástroje, oddelené čiarkou (každý človek vlastný, dá sa zrušiť zvlášť); prázdne = vypnuté
+  apiTokens: (process.env.API_TOKEN || '').split(',').map((t) => t.trim()).filter((t) => t.length >= 16),
   removeBgKey: process.env.REMOVEBG_API_KEY || '',
   rembgUrl: process.env.REMBG_URL || '',
   // Model treba určiť: predvolený model rembg servera (bria-rmbg, 1 GB) má nekomerčnú licenciu a žerie pamäť

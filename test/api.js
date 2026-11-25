@@ -10,7 +10,7 @@ import sharp from 'sharp';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feedbridge-api-'));
 process.env.DATA_DIR = tmp;
 process.env.ADMIN_PASSWORD = 'tajne';
-process.env.API_TOKEN = 'mcp-token';
+process.env.API_TOKEN = 'mcp-token-0123456789, kolega-token-0123456789,kratky';
 process.env.ALLOW_PRIVATE_FETCH = '1'; // fixture servery bežia na 127.0.0.1
 process.env.PORT = '0';
 
@@ -404,9 +404,11 @@ await t('zlyhaný zdroj nechá predchádzajúci feed a beh skončí ako error', 
 });
 
 await t('MCP: token, príprava a potvrdenie zmeny, výber produktov, ID pravidiel, run_id', async () => {
-  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + (opts.token || 'mcp-token'), ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + (opts.token || 'mcp-token-0123456789'), ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
   assert.equal((await bearer('/projects', { token: 'zly' })).status, 401);
-  assert.equal((await fetch(base + '/admin/', { headers: { Authorization: 'Bearer mcp-token' } })).status, 401, 'token neotvorí admin UI');
+  assert.equal((await bearer('/projects', { token: 'kolega-token-0123456789' })).status, 200, 'druhý token v zozname');
+  assert.equal((await bearer('/projects', { token: 'kratky' })).status, 401, 'príliš krátky token sa ignoruje');
+  assert.equal((await fetch(base + '/admin/', { headers: { Authorization: 'Bearer mcp-token-0123456789' } })).status, 401, 'token neotvorí admin UI');
   let cur = await (await bearer('/projects/' + proj.id)).json();
   assert.ok(cur.config.profiles[0].selection && cur.config.profiles[0].selection.mode === 'all');
   // príprava: nový profil s výberom podľa ID, pravidlo s custom labelom, akcia
@@ -482,7 +484,7 @@ await t('MCP: token, príprava a potvrdenie zmeny, výber produktov, ID pravidie
 });
 
 await t('MCP: nálezy z review (slug pri potvrdení, regex, polia pravidiel, dlhé ID akcie, výber pri obnove, ID pravidiel)', async () => {
-  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer mcp-token', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer mcp-token-0123456789', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
   const prep = async (ops) => { const c = await (await bearer('/projects/' + proj.id)).json(); const r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: c.rev, ops } }); return [r.status, await r.json()]; };
   // 1) slug obsadený medzi prípravou a potvrdením
   let [st, ch] = await prep([{ op: 'create_profile', name: 'X', channel: 'meta', slug: 'shared-feed' }]);

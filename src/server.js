@@ -70,7 +70,7 @@ function safeEq(a, b) {
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   // MCP nástroje: vlastný token (API_TOKEN), len pre /api; dá sa zrušiť bez zmeny admin hesla
-  if (config.apiToken && h.startsWith('Bearer ') && req.baseUrl === '/api' && safeEq(h.slice(7), config.apiToken)) return next();
+  if (h.startsWith('Bearer ') && req.baseUrl === '/api' && config.apiTokens.some((t) => safeEq(h.slice(7), t))) return next();
   if (h.startsWith('Basic ')) {
     const [u, ...rest] = Buffer.from(h.slice(6), 'base64').toString().split(':');
     if (safeEq(u, config.adminUser) && safeEq(rest.join(':'), config.adminPassword)) return next();
