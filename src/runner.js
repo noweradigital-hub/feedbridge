@@ -11,12 +11,13 @@ export function isRunning(projectId) {
 }
 
 /** Spustí beh projektu (zabráni súbežnému behu toho istého projektu). force = obíď poistku poklesu. */
-export async function triggerRun(projectId, { force = false } = {}) {
+export async function triggerRun(projectId, { force = false, onStart } = {}) {
   const project = projects.get(projectId);
   if (!project) throw new Error('Projekt neexistuje');
   if (running.has(projectId)) throw new Error('Projekt sa práve spracúva');
   running.add(projectId);
   const runId = runs.start(projectId);
+  onStart?.(runId); // synchrónne, ešte pred prvým await: volajúci dostane ID behu hneď
   const lines = [];
   const log = (m) => lines.push(`${new Date().toISOString().slice(11, 19)} ${m}`);
   let result;

@@ -6,7 +6,7 @@ const FIELDS = ['id', 'title', 'description', 'link', 'image_link', 'additional_
   'price_num', 'sale_price_num', 'discount_pct', 'currency'];
 
 const OPS = { eq: 'sa rovná', neq: 'nerovná sa', contains: 'obsahuje', ncontains: 'neobsahuje', regex: 'regex',
-  empty: 'je prázdne', nempty: 'nie je prázdne', gt: '>', lt: '<', gte: '≥', lte: '≤', in: 'je jedno z (a,b,c)' };
+  empty: 'je prázdne', nempty: 'nie je prázdne', gt: '>', lt: '<', gte: '≥', lte: '≤', in: 'je jedno z (a,b,c)', nin: 'nie je ani jedno z (a,b,c)' };
 
 const CHANNELS = { meta: 'Meta', google: 'Google', chatgpt: 'ChatGPT' };
 const TAG_POSITIONS = { auto: 'Automaticky (vľavo hore, bez cien vľavo dole)', 'top-left': 'Vľavo hore', 'top-right': 'Vpravo hore', 'bottom-left': 'Vľavo dole', 'bottom-right': 'Vpravo dole' };
@@ -373,6 +373,7 @@ function tabProfiles() {
         google && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'tag warning', style: 'white-space:normal;line-height:1.4;padding:8px 12px;border-radius:10px' },
           'Google Merchant Center zamieta hlavné obrázky s promo textom (ceny, zľavy, štítky akcie) a produkty potom nezobrazí. Bezpečný je „Upravený formát“ alebo pôvodné fotky.') : null,
         chatgpt && ['project', 'percent'].includes(pr.imageMode) ? h('p', { class: 'muted' }, 'OpenAI pravidlá k textu na obrázkoch nezverejnil, over si to pri schvaľovaní.') : null,
+        selectionEditor(pr),
         chatgpt ? h('div', {},
           h('h3', {}, 'Údaje pre OpenAI'),
           h('div', { class: 'grid' },
@@ -394,6 +395,22 @@ function tabProfiles() {
         profiles.push({ slug, name: label, channel: ch, enabled: true, imageMode: ch === 'meta' ? 'project' : 'original', imageModeVersion: 2, rules: [] });
         markDirty(); render();
       } }, `+ Profil pre ${label}`))));
+}
+
+/** Ktoré produkty idú do feedu profilu: všetky, zoznam ID / skupín variantov, alebo podľa podmienok. */
+function selectionEditor(pr) {
+  const s = pr.selection = pr.selection || { mode: 'all', ids: [], groups: [], when: [] };
+  const toList = (v) => [...new Set(String(v).split(/[\s,]+/).map((x) => x.trim()).filter(Boolean))];
+  return h('details', { open: s.mode !== 'all' },
+    h('summary', {}, `Výber produktov: ${s.mode === 'all' ? 'všetky' : s.mode === 'ids' ? `${s.ids.length} ID${s.groups.length ? ` + ${s.groups.length} skupín` : ''}` : `podľa ${s.when.length} podmienok`}`),
+    h('div', { class: 'grid', style: 'margin-top:10px' },
+      selectInput('Do feedu idú', s, 'mode', { all: 'Všetky produkty (po pravidlách)', ids: 'Len vybrané ID produktov', filter: 'Len produkty, ktoré spĺňajú podmienky' }, () => render())),
+    s.mode === 'ids' ? h('div', { class: 'grid' },
+      h('label', { class: 'f' }, 'ID produktov (oddelené čiarkou alebo novým riadkom)',
+        h('textarea', { rows: 4, oninput: (e) => { s.ids = toList(e.target.value); markDirty(); } }, s.ids.join('\n'))),
+      h('label', { class: 'f' }, 'Skupiny variantov (item_group_id), aj budúce varianty',
+        h('textarea', { rows: 4, oninput: (e) => { s.groups = toList(e.target.value); markDirty(); } }, s.groups.join('\n')))) : null,
+    s.mode === 'filter' ? whenEditor(s) : null);
 }
 
 /** Prepínač profilu pre Náhľad a Výstup. */

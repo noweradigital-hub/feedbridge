@@ -973,6 +973,16 @@ await t('profil s akciou: všetky produkty dostanú len štítok akcie, bez cien
   projects.remove(proj.id);
   for (const f of ['bf-test', 'bf-test-bf']) fs.rmSync(path.join(tmp, 'feeds', `${f}.xml`), { force: true });
 });
+await t('nin nad dostupnosťou a jedinečné ID pravidiel naprieč projektom', async () => {
+  const { normalizeConfig } = await import('../src/db.js');
+  assert.equal(testWhen({ availability: 'in stock' }, [{ field: 'availability', op: 'nin', value: 'in_stock' }]), false);
+  assert.equal(testWhen({ availability: 'in stock' }, [{ field: 'availability', op: 'in', value: 'in_stock' }]), true);
+  const rule = { type: 'set', field: 'brand', value: 'X' };
+  const c = normalizeConfig({ rules: [rule], profiles: [{ slug: 'project', name: 'p', rules: [rule] }, { slug: 'iny', name: 'i', rules: [{ ...rule, id: 'rabcdef123' }, { ...rule, id: 'rabcdef123' }] }] }, 'x');
+  const ids = [...c.rules, ...c.profiles.flatMap((p) => p.rules)].map((r) => r.id);
+  assert.equal(new Set(ids).size, ids.length, ids.join(','));
+  assert.deepEqual(normalizeConfig(c, 'x').rules.map((r) => r.id), c.rules.map((r) => r.id), 'stabilné pri ďalšom čítaní');
+});
 await t('beh: akcia priradená produktu sa dostane na obrázok, čistý profil ostáva bez grafiky', async () => {
   const proj = projects.create({ name: 'Akcie', slug: 'akcie-test', source_url: `${base}/feed.xml`, config: {
     images: { enabled: true, base: 'photo', size: 520, badge: { enabled: true, preset: 'layout-1' } },

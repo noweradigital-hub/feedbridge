@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { parseFeed } from './parse.js';
-import { applyRules, checkItem, fieldValue, channelOf, CHANNELS } from './rules.js';
+import { applyRules, checkItem, fieldValue, channelOf, CHANNELS, testWhen } from './rules.js';
 import { buildFeedXml } from './xml.js';
 import { buildOpenAIFeed, readOpenAIFeed, normalizeOpenAI } from './openai.js';
 import { ensureImage, pruneImages, mapLimit, fetchCached } from '../images.js';
@@ -46,6 +46,21 @@ const sourceOf = (original) => ({ id: fieldValue(original, 'id').trim(), group: 
 
 const rulesFor = (project, profile) => [...(project.config.rules || []), ...(profile.rules || [])];
 
+/**
+ * Výber produktov profilu (db.js normalizeSelection) ako funkcia (položka po pravidlách, zdroj) -> patrí do feedu?
+ * ids sa porovnávajú so zdrojovým ID a skupinou variantov (pravidlá ich môžu prepísať), filter vidí položku po pravidlách.
+ */
+export function selector(profile, cfg, at = Date.now()) {
+  const s = profile.selection;
+  if (!s || s.mode === 'all') return () => true;
+  if (s.mode === 'ids') {
+    const ids = new Set(s.ids || []), groups = new Set(s.groups || []);
+    return (_item, src) => ids.has(src.id) || (!!src.group && groups.has(src.group));
+  }
+  const ctx = { pricing: { priceField: cfg.images?.badge?.priceField, referenceField: cfg.images?.badge?.referenceField }, at };
+  return (item) => testWhen(item, s.when || [], ctx);
+}
+
 /** Len pravidlá, bez obrázkov - pre náhľad v UI. `profile` = slug profilu, inak prvý. */
 export async function previewProject(project, { limit = 60, profile: slug } = {}) {
   const all = project.config.profiles || [];
@@ -53,13 +68,23 @@ export async function previewProject(project, { limit = 60, profile: slug } = {}
   if (!profile) throw new Error('Projekt nemá žiadny exportný profil');
   const xml = await fetchSource(project.source_url);
   const { items } = parseFeed(xml);
+  return dryRunProfile(project, profile, items, { limit });
+}
+
+/** Pravidlá a výber jedného profilu nad už stiahnutým zdrojom (náhľad, dopad pripravenej zmeny). */
+export function dryRunProfile(project, profile, items, { limit = 0, at = Date.now() } = {}) {
   const rules = rulesFor(project, profile);
+  const pick = selector(profile, project.config, at);
   const rows = [];
   let excluded = 0;
   let invalid = 0;
+  let notSelected = 0;
   const seen = new Set();
   for (const original of items) {
-    const { item, excluded: ex, changed } = applyRules(original, rules, profile.channel);
+    const res = applyRules(original, rules, profile.channel);
+    const { item, changed } = res;
+    let ex = res.excluded;
+    if (!ex && !pick(item, sourceOf(original))) { ex = { index: -1, note: 'mimo výberu produktov profilu' }; notSelected++; }
     if (ex) { excluded++; }
     const { errors: issues, warnings: notes } = ex ? { errors: [], warnings: [] } : checkItem(item, profile.channel);
     if (!ex) {
@@ -72,7 +97,7 @@ export async function previewProject(project, { limit = 60, profile: slug } = {}
       rows.push({ original, result: ex ? null : item, excluded: ex, changed, issues, notes });
     }
   }
-  return { total: items.length, excluded, invalid, rows, profile: profile.slug, channel: channelOf(profile.channel) };
+  return { total: items.length, excluded, notSelected, invalid, written: items.length - excluded, rows, profile: profile.slug, channel: channelOf(profile.channel) };
 }
 
 export class GuardError extends Error {
@@ -138,11 +163,13 @@ async function runProfile(project, profile, items, channel, ps, used, log, force
   const openai = channelOf(profile.channel) === 'chatgpt';
   if (openai && !normalizeOpenAI(profile.openai).sellerName) throw new Error('Profil ChatGPT nemá vyplnený názov predajcu (seller_name), OpenAI ho vyžaduje pri každom produkte.');
   const rules = rulesFor(project, profile);
+  const pick = selector(profile, cfg, at);
   const processed = [];
   const sources = new Map(); // položka po pravidlách -> zdrojové ID a skupina
   for (const original of items) {
     const { item, excluded } = applyRules(original, rules, profile.channel);
     if (excluded) { ps.excluded++; continue; }
+    if (!pick(item, sourceOf(original))) { ps.excluded++; ps.notSelected = (ps.notSelected || 0) + 1; continue; }
     processed.push(item);
     sources.set(item, sourceOf(original));
   }

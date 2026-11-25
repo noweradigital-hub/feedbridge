@@ -3,10 +3,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { config } from './config.js';
 import { projects, runs, versions, validSlug, normalizeProfiles, normalizeConfig } from './db.js';
 import { triggerRun, isRunning, startScheduler } from './runner.js';
-import { previewProject, imageModeOf, feedFileOf, feedNameOf } from './feed/pipeline.js';
+import { previewProject, imageModeOf, feedFileOf, feedNameOf, selector } from './feed/pipeline.js';
 import { readOpenAIFeed, rowsToCsv } from './feed/openai.js';
 import zlib from 'node:zlib';
 import { parseFeed } from './feed/parse.js';
@@ -14,6 +15,7 @@ import { fetchSource } from './feed/pipeline.js';
 import { renderPreview, validAssetName, originalJpeg, imagePlan } from './images.js';
 import { resolveCampaign, own, MAX_OVERRIDES } from './campaigns.js';
 import { generateImage } from './magnific.js';
+import { applyOps, assignOverrides, changes, ChangeError } from './changes.js';
 import sharp from 'sharp';
 import { applyRules, fieldValue, resolvePricing } from './feed/rules.js';
 
@@ -67,6 +69,8 @@ function safeEq(a, b) {
 }
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
+  // MCP nástroje: vlastný token (API_TOKEN), len pre /api; dá sa zrušiť bez zmeny admin hesla
+  if (config.apiToken && h.startsWith('Bearer ') && req.baseUrl === '/api' && safeEq(h.slice(7), config.apiToken)) return next();
   if (h.startsWith('Basic ')) {
     const [u, ...rest] = Buffer.from(h.slice(6), 'base64').toString().split(':');
     if (safeEq(u, config.adminUser) && safeEq(rest.join(':'), config.adminPassword)) return next();
@@ -84,7 +88,7 @@ class HttpError extends Error {
 const wrap = (fn) => (req, res) =>
   Promise.resolve()
     .then(() => fn(req, res))
-    .catch((e) => res.status(e.status || 500).json({ error: e.message }));
+    .catch((e) => res.status(e.status || 500).json({ error: e.message, ...(e.code ? { code: e.code } : {}) }));
 
 // pri mazaní profilu nevieme, či sa medzitým nezmenil kanál: zmažú sa obe podoby
 const removeFeeds = (slug) => { for (const ext of ['xml', 'jsonl.gz']) fs.rmSync(path.join(config.feedsDir, `${slug}.${ext}`), { force: true }); };
@@ -184,17 +188,22 @@ app.put('/api/projects/:id', wrap((req, res) => {
   const old = projects.get(id);
   if (!old) return res.status(404).json({ error: 'Projekt neexistuje' });
   assertFresh(req.body, old);
-  const data = readBody(req.body, old);
+  res.json(publicProject(saveProject(old, readBody(req.body, old))));
+}));
+
+/** Uloženie projektu (PUT aj potvrdená zmena z MCP): kontroly počas behu a upratanie feedov. */
+function saveProject(old, data) {
+  const id = old.id;
   // Bežiaci beh pracuje so starým zoznamom profilov: keby sme mu profil medzitým zmazali,
   // zapísal by feed späť a jeho uvoľnený slug by už mohol patriť inému projektu.
   const keptSlugs = new Set(data.config.profiles.map((p) => p.slug));
   if (isRunning(id) && old.config.profiles.some((p) => !keptSlugs.has(p.slug))) {
-    throw new HttpError(409, 'Projekt sa práve spracúva. Profil sa dá zmazať až po dokončení behu.');
+    throw new ChangeError('Projekt sa práve spracúva. Profil sa dá zmazať až po dokončení behu.', 409, 'running');
   }
   // to isté pri zmene kanála: beh by zapísal súbor v starom formáte (napr. XML) po tom, čo sme ho zmazali
   const newChannel = new Map(data.config.profiles.map((p) => [p.slug, feedNameOf(p)]));
   if (isRunning(id) && old.config.profiles.some((p) => newChannel.has(p.slug) && newChannel.get(p.slug) !== feedNameOf(p))) {
-    throw new HttpError(409, 'Projekt sa práve spracúva. Kanál profilu sa dá zmeniť až po dokončení behu.');
+    throw new ChangeError('Projekt sa práve spracúva. Kanál profilu sa dá zmeniť až po dokončení behu.', 409, 'running');
   }
   const updated = projects.update(id, data);
   // odstránený profil: jeho feed zmizne, aby kanál nedostával potichu zastarané dáta
@@ -205,7 +214,69 @@ app.put('/api/projects/:id', wrap((req, res) => {
     const before = old.config.profiles.find((o) => o.slug === p.slug);
     if (before && feedNameOf(before) !== feedNameOf(p)) fs.rmSync(feedFileOf(before), { force: true });
   }
-  res.json(publicProject(updated));
+  return updated;
+}
+
+/** Dopad zmeny v samostatnom vlákne s časovým limitom (zlý regex nesmie zaseknúť server). */
+function impactInWorker(jobs, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(new URL('./impact-worker.js', import.meta.url), { workerData: { jobs } });
+    const timer = setTimeout(() => { w.terminate(); reject(new Error('výpočet trval priveľa (podmienka alebo regex je príliš náročný)')); }, timeoutMs);
+    w.once('message', (m) => { clearTimeout(timer); w.terminate(); resolve(m); });
+    w.once('error', (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
+/**
+ * Zmeny cez MCP nástroje v dvoch krokoch. Príprava nič neukladá: vráti zhrnutie a dopad (koľko
+ * produktov pôjde do ktorého feedu pred a po zmene). Potvrdenie uloží presne pripravený stav,
+ * len ak projekt medzitým nikto nezmenil (rev).
+ */
+app.post('/api/projects/:id/changes', wrap(async (req, res) => {
+  const p = projects.get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: 'Projekt neexistuje' });
+  if (!Number.isInteger(req.body?.rev) || req.body.rev !== p.rev) throw new ChangeError(`Projekt má medzitým novšiu verziu (rev ${p.rev}). Načítaj ho znova a zmenu priprav nanovo.`, 409, 'stale');
+  const { data: draft, summary } = applyOps(p, req.body.ops);
+  const data = readBody({ ...draft, config: draft.config }, p); // rovnaké kontroly ako PUT (slugy, profily)
+  const next = { ...p, ...data, config: normalizeConfig(data.config, p.slug) };
+  const warnings = [];
+  const impact = [];
+  let before = null, after = null;
+  try { before = p.source_url ? await sourceItemsCached(p.source_url) : null; } catch (e) { warnings.push(`Zdroj sa nepodarilo načítať, dopad nie je spočítaný: ${e.message}`); }
+  try { after = next.source_url === p.source_url ? before : next.source_url ? await sourceItemsCached(next.source_url) : null; } catch (e) { warnings.push(`Nový zdroj sa nepodarilo načítať: ${e.message}`); }
+  const slugs = [...new Set([...p.config.profiles, ...next.config.profiles].map((x) => x.slug))];
+  const pairs = slugs.map((slug) => [p.config.profiles.find((x) => x.slug === slug), next.config.profiles.find((x) => x.slug === slug)]);
+  const jobs = pairs.flatMap(([a, b]) => [{ project: p, profile: a, items: before }, { project: next, profile: b, items: after }]);
+  const counts = await impactInWorker(jobs).catch((e) => { warnings.push(e.message); return null; });
+  if (!counts) throw new ChangeError(`Dopad zmeny sa nepodarilo spočítať: ${warnings.at(-1)}`, 400);
+  for (const [i, slug] of slugs.entries()) {
+    const [a, b] = pairs[i];
+    const row = { profile: slug, name: (b || a).name, channel: (b || a).channel, before: counts[2 * i], after: counts[2 * i + 1] };
+    impact.push(row);
+    if (row.after && row.after.enabled && row.after.written === 0) warnings.push(`Feed ${slug} by bol prázdny; poistka poklesu ho pri behu nezapíše.`);
+    if (row.before && row.after && row.after.enabled && row.before.written > 0 && row.after.written < row.before.written * 0.5) {
+      warnings.push(`Feed ${slug} klesne z ${row.before.written} na ${row.after.written} produktov; poistka poklesu (50 %) ho pri behu zastaví.`);
+    }
+    if (!a && b?.enabled) warnings.push(`Nový feed ${slug} sa zverejní pri najbližšom behu (/feeds/${feedNameOf(b)}).`);
+  }
+  const change_id = changes.put({ projectId: p.id, rev: p.rev, data, summary });
+  res.json({ change_id, project_id: p.id, rev: p.rev, summary, impact, warnings });
+}));
+
+app.post('/api/changes/:cid/apply', wrap((req, res) => {
+  const ch = changes.take(String(req.params.cid));
+  if (!ch) throw new ChangeError('Pripravená zmena neexistuje alebo vypršala (30 minút). Priprav ju znova.', 409, 'expired');
+  const old = projects.get(ch.projectId);
+  if (!old) return res.status(404).json({ error: 'Projekt neexistuje' });
+  if (old.rev !== ch.rev) { changes.drop(req.params.cid); throw new ChangeError('Projekt sa medzitým zmenil, zmenu treba pripraviť znova.', 409, 'stale'); }
+  // slugy znova: medzitým mohol iný projekt obsadiť URL, ktorú si pripravená zmena berie
+  let data;
+  try { data = readBody(ch.data, old); } catch (e) { changes.drop(req.params.cid); throw new ChangeError(`${e.message} Zmenu priprav znova.`, 409, 'stale'); }
+  const updated = saveProject(old, data);
+  changes.drop(req.params.cid);
+  const pub = publicProject(updated);
+  res.json({ applied: true, project_id: old.id, rev_before: old.rev, rev_after: updated.rev, summary: ch.summary,
+    profiles: pub.config.profiles.map((x) => ({ slug: x.slug, name: x.name, channel: x.channel, enabled: x.enabled, feed_url: x.feed_url })) });
 }));
 
 app.post('/api/projects/:id/duplicate', wrap((req, res) => {
@@ -250,8 +321,9 @@ app.post('/api/projects/:id/run', wrap(async (req, res) => {
   // force = používateľ potvrdil zápis napriek poistke poklesu; beh v pozadí, UI si stav ťahá cez /runs
   const f = req.body?.force;
   const force = f === true ? true : Array.isArray(f) ? f.filter((x) => typeof x === 'string') : false; // true = všetky profily, pole = len vymenované
-  triggerRun(id, { force }).catch((e) => console.error(e));
-  res.status(202).json({ started: true });
+  let runId = null;
+  triggerRun(id, { force, onStart: (r) => { runId = r; } }).catch((e) => console.error(e));
+  res.status(202).json({ started: true, run_id: runId });
 }));
 
 app.get('/api/projects/:id/runs', (req, res) => res.json(runs.list(Number(req.params.id))));
@@ -355,13 +427,19 @@ app.get('/api/projects/:id/products', wrap(async (req, res) => {
   const at = Date.now();
   const seen = new Set();
   const groupsSeen = new Set();
+  // voliteľne podľa profilu: jeho pravidlá a výber produktov (in_profile = pôjde do jeho feedu)
+  const q = req.query || {};
+  const prof = q.profile ? cfg.profiles.find((x) => x.slug === q.profile) : null;
+  if (q.profile && !prof) return res.status(400).json({ error: `Profil „${q.profile}“ v projekte nie je` });
+  const pick = prof ? selector(prof, cfg, at) : null;
+  const rules = prof ? [...cfg.rules, ...prof.rules] : cfg.rules;
   const list = items.map((original) => {
     const src = sourceOf(original);
     seen.add(src.id);
     if (src.group) groupsSeen.add(src.group);
-    const { item, excluded } = applyRules(original, cfg.rules);
+    const { item, excluded } = applyRules(original, rules, prof?.channel);
     const pricing = resolvePricing(item, { priceField: cfg.images.badge.priceField, referenceField: cfg.images.badge.referenceField }, at);
-    const plan = resolveCampaign(item, src, cfg, at);
+    const plan = resolveCampaign(item, src, cfg, at, prof?.campaign || '');
     const ctx = { brand: cfg.brand, at, campaign: plan.campaign, layout: plan.layout, hidePrices: plan.hidePrices };
     return {
       id: src.id,
@@ -379,8 +457,31 @@ app.get('/api/projects/:id/products', wrap(async (req, res) => {
       inherited: own(cfg.groups, src.group) || {},
       layout: plan.layout || cfg.images.badge.preset,
       graphic: !excluded && cfg.images.enabled && !!imagePlan(item, cfg.images, ctx).badge,
+      category: fieldValue(original, 'product_type'),
+      link: fieldValue(original, 'link'),
+      availability: fieldValue(item, 'availability'),
+      brand: fieldValue(item, 'brand'),
+      ...(pick ? { in_profile: !excluded && pick(item, src) } : {}),
     };
   });
+  // vyhľadávanie (MCP nástroje): bez parametrov ostáva celý zoznam pre UI
+  const filtered = ['q', 'ids', 'category', 'discounted', 'campaign', 'profile', 'limit', 'offset'].some((k) => q[k] !== undefined);
+  if (filtered) {
+    const needle = String(q.q || '').toLowerCase();
+    const idSet = q.ids ? new Set(String(q.ids).split(',').map((x) => x.trim()).filter(Boolean)) : null;
+    const cat = String(q.category || '').toLowerCase();
+    let rows = list.filter((r) => (!needle || r.title.toLowerCase().includes(needle) || r.id.toLowerCase() === needle || r.link.toLowerCase().includes(needle))
+      && (!idSet || idSet.has(r.id) || (r.group && idSet.has(r.group)))
+      && (!cat || r.category.toLowerCase().includes(cat))
+      && (q.discounted === undefined || (q.discounted === '1' || q.discounted === 'true') === r.pct > 0)
+      && (!q.campaign || r.campaign === q.campaign)
+      && (q.in_profile === undefined || !pick || String(r.in_profile) === String(q.in_profile)));
+    const total = rows.length;
+    const offset = Math.max(0, parseInt(q.offset, 10) || 0);
+    const limit = Math.min(500, Math.max(1, parseInt(q.limit, 10) || 50));
+    rows = rows.slice(offset, offset + limit);
+    return res.json({ total, offset, limit, items: rows });
+  }
   res.json({
     items: list,
     orphans: {
@@ -403,40 +504,7 @@ app.post('/api/projects/:id/assign', wrap((req, res) => {
   if (!p) return res.status(404).json({ error: 'Projekt neexistuje' });
   const body = req.body || {};
   assertFresh(body, p);
-  const keys = (v) => (Array.isArray(v) ? [...new Set(v.map(String).filter(Boolean))] : []);
-  const ids = keys(body.ids), groups = keys(body.groups), reset = keys(body.reset);
-  const set = body.set && typeof body.set === 'object' ? body.set : null;
-  if (!set || (!ids.length && !groups.length)) throw new HttpError(400, 'Chýba výber produktov alebo to, čo sa má nastaviť');
-  if (ids.length + groups.length + reset.length > MAX_OVERRIDES) throw new HttpError(400, 'Priveľa produktov naraz');
-  for (const k of [...ids, ...groups, ...reset]) {
-    if (k.length > 120 || ['__proto__', 'constructor', 'prototype'].includes(k)) throw new HttpError(400, `ID „${k.slice(0, 40)}“ sa nedá použiť ako kľúč nastavenia`);
-  }
-  if (set.campaign !== undefined && !['auto', 'none'].includes(set.campaign) && !p.config.campaigns.some((c) => c.id === set.campaign)) {
-    throw new HttpError(400, 'Táto akcia v projekte neexistuje');
-  }
-  const explicit = body.explicit === true;
-  const patch = (map, list, clearOnly) => {
-    const out = Object.assign(Object.create(null), map); // kľúče sú ID z požiadavky, nesmú siahnuť na prototyp
-    for (const k of list) {
-      const cur = { ...(own(map, k) || {}) };
-      const put = (field, value, isDefault, marker) => {
-        if (value === undefined) return;
-        if (clearOnly || (isDefault && !explicit)) delete cur[field];
-        else cur[field] = isDefault ? marker : value;
-      };
-      put('campaign', set.campaign, set.campaign === 'auto', 'auto');
-      put('layout', set.layout, !set.layout || set.layout === 'default', 'default');
-      put('prices', set.prices, set.prices !== 'hide', 'show');
-      out[k] = cur; // prázdne záznamy vyhodí normalizácia
-    }
-    return { ...out };
-  };
-  const products = patch(patch(p.config.products, reset, true), ids, false);
-  const grouped = patch(p.config.groups, groups, false);
-  const filled = (m) => Object.values(m).filter((v) => Object.keys(v).length).length;
-  if (filled(products) > MAX_OVERRIDES || filled(grouped) > MAX_OVERRIDES) {
-    throw new HttpError(400, `Projekt môže mať najviac ${MAX_OVERRIDES} vlastných nastavení produktov. Použi radšej podmienku v akcii.`);
-  }
+  const { products, groups: grouped } = assignOverrides(p.config, { ids: body.ids, groups: body.groups, reset: body.reset, set: body.set, explicit: body.explicit === true });
   res.json(publicProject(projects.update(p.id, { ...p, config: { ...p.config, products, groups: grouped } })));
 }));
 
@@ -458,7 +526,7 @@ app.post('/api/projects/:id/versions/:vid/restore', wrap((req, res) => {
   const byId = new Map((old.profiles || []).map((pr) => [pr.id, pr]));
   const profiles = p.config.profiles.map((pr) => {
     const o = byId.get(pr.id);
-    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, imageModeVersion: o.imageModeVersion, campaign: o.campaign, tagPosition: o.tagPosition, rules: o.rules } : pr;
+    return o ? { ...pr, name: o.name, enabled: o.enabled, imageMode: o.imageMode, imageModeVersion: o.imageModeVersion, campaign: o.campaign, tagPosition: o.tagPosition, selection: o.selection, rules: o.rules } : pr;
   });
   const restored = projects.update(p.id, { ...p, config: { ...old, profiles } });
   res.json(publicProject(restored));

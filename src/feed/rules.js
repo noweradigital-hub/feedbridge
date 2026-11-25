@@ -122,10 +122,10 @@ export function testCondition(item, cond, ctx) {
   const val = String(cond.value ?? '');
   let a = raw.toLowerCase();
   let b = val.toLowerCase();
-  if (cond.field === 'availability' && ['eq', 'neq', 'in'].includes(cond.op)) {
+  if (cond.field === 'availability' && ['eq', 'neq', 'in', 'nin'].includes(cond.op)) {
     // podmienka "in_stock" aj "in stock" platí pred aj po normalizácii na formát Mety (contains/regex ostávajú doslovné)
     a = metaAvailability(a);
-    b = cond.op === 'in' ? b.split(',').map((x) => metaAvailability(x.trim())).join(',') : metaAvailability(b);
+    b = cond.op === 'in' || cond.op === 'nin' ? b.split(',').map((x) => metaAvailability(x.trim())).join(',') : metaAvailability(b);
   }
   switch (cond.op) {
     case 'eq': return a === b;
@@ -137,6 +137,7 @@ export function testCondition(item, cond, ctx) {
     case 'empty': return raw.trim() === '';
     case 'nempty': return raw.trim() !== '';
     case 'in': return b.split(',').map((x) => x.trim()).filter(Boolean).includes(a);
+    case 'nin': return !b.split(',').map((x) => x.trim()).filter(Boolean).includes(a);
     case 'gt': case 'lt': case 'gte': case 'lte': {
       const x = parseFloat(raw.replace(',', '.'));
       const y = parseFloat(val.replace(',', '.'));

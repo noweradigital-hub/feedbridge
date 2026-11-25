@@ -10,6 +10,7 @@ import sharp from 'sharp';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feedbridge-api-'));
 process.env.DATA_DIR = tmp;
 process.env.ADMIN_PASSWORD = 'tajne';
+process.env.API_TOKEN = 'mcp-token';
 process.env.ALLOW_PRIVATE_FETCH = '1'; // fixture servery bežia na 127.0.0.1
 process.env.PORT = '0';
 
@@ -400,6 +401,143 @@ await t('zlyhaný zdroj nechá predchádzajúci feed a beh skončí ako error', 
   }
   assert.equal(p.last_status, 'error');
   assert.equal((await fetch(base + '/feeds/demo.xml')).status, 200);
+});
+
+await t('MCP: token, príprava a potvrdenie zmeny, výber produktov, ID pravidiel, run_id', async () => {
+  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + (opts.token || 'mcp-token'), ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  assert.equal((await bearer('/projects', { token: 'zly' })).status, 401);
+  assert.equal((await fetch(base + '/admin/', { headers: { Authorization: 'Bearer mcp-token' } })).status, 401, 'token neotvorí admin UI');
+  let cur = await (await bearer('/projects/' + proj.id)).json();
+  assert.ok(cur.config.profiles[0].selection && cur.config.profiles[0].selection.mode === 'all');
+  // príprava: nový profil s výberom podľa ID, pravidlo s custom labelom, akcia
+  let r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: cur.rev, ops: [
+    { op: 'create_profile', name: 'BF', channel: 'meta', imageMode: 'campaign', tagPosition: 'top-left' },
+    { op: 'upsert_campaign', name: 'Zimná akcia', color: '#112233' },
+    { op: 'set_custom_label', scope: 'project', label: 2, value: 'zima' },
+    { op: 'update_project', source_url: srcUrl }, // predchádzajúci test nechal nefunkčný zdroj
+  ] } });
+  assert.equal(r.status, 200, await r.clone().text());
+  let ch = await r.json();
+  assert.equal(ch.summary.length, 4);
+  const slug = `${cur.slug}-bf`;
+  assert.ok(ch.impact.some((x) => x.profile === slug && x.before === null && x.after?.written === 1), JSON.stringify(ch));
+  assert.ok(ch.warnings.some((w) => w.includes(slug)));
+  const unchanged = await (await bearer('/projects/' + proj.id)).json();
+  assert.equal(unchanged.rev, cur.rev, 'príprava nič neuloží');
+  r = await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const applied = await r.json();
+  assert.equal(applied.rev_after, cur.rev + 1);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 409, 'druhé potvrdenie nič nespraví');
+  cur = await (await bearer('/projects/' + proj.id)).json();
+  const bf = cur.config.profiles.find((x) => x.slug === slug);
+  assert.equal(bf.imageMode, 'campaign');
+  assert.equal(bf.tagPosition, 'top-left');
+  const label = cur.config.rules.find((x) => x.field === 'custom_label_2');
+  assert.match(label.id, /^r[0-9a-f]{9}$/);
+  assert.ok(cur.config.rules.every((x) => /^r[0-9a-z]{4,}/.test(x.id)), 'všetky pravidlá majú id');
+  const camp = cur.config.campaigns.find((c) => c.name === 'Zimná akcia');
+  // výber: ID, ktoré vo feede nie je => feed prázdny, varovanie; zastaraná rev => 409 stale
+  r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: cur.rev - 1, ops: [{ op: 'remove_rule', rule_id: label.id }] } });
+  assert.equal(r.status, 409); assert.equal((await r.json()).code, 'stale');
+  r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: cur.rev, ops: [
+    { op: 'set_selection', profile: slug, mode: 'ids', ids: ['neexistuje'] },
+    { op: 'update_profile', profile: slug, campaign: camp.id },
+    { op: 'update_rule', rule_id: label.id, patch: { value: 'zima-2026' } },
+  ] } });
+  ch = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(ch));
+  assert.ok(ch.warnings.some((w) => w.includes('prázdny')), JSON.stringify(ch.warnings));
+  // medzitým niekto uloží projekt => potvrdenie odmietne
+  const put = await api('/projects/' + proj.id, { method: 'PUT', body: { ...cur } });
+  assert.equal(put.status, 200);
+  r = await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' });
+  assert.equal(r.status, 409); assert.equal((await r.json()).code, 'stale');
+  // neplatné operácie
+  cur = await (await bearer('/projects/' + proj.id)).json();
+  for (const ops of [[{ op: 'nic' }], [{ op: 'add_rule', scope: 'project', rule: { type: 'zly' } }], [{ op: 'set_selection', profile: 'nie-je', mode: 'all' }],
+    [{ op: 'add_rule', scope: 'project', rule: { type: 'exclude', when: [{ field: 'id', op: 'regex', value: '(' }] } }]]) {
+    r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: cur.rev, ops } });
+    assert.equal(r.status, 400, JSON.stringify(ops));
+  }
+  // výber podľa podmienky nin + vyhľadávanie produktov podľa profilu
+  r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: cur.rev, ops: [{ op: 'set_selection', profile: slug, mode: 'filter', when: [{ field: 'id', op: 'nin', value: ['2', '3'] }] }] } });
+  ch = await r.json();
+  assert.equal(ch.impact.find((x) => x.profile === slug).after.written, 1);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  const prods = await (await bearer(`/projects/${proj.id}/products?profile=${slug}&limit=10`)).json();
+  assert.equal(prods.total, 1); assert.equal(prods.items[0].in_profile, true); assert.equal(prods.items[0].category, '');
+  assert.equal((await (await bearer(`/projects/${proj.id}/products?q=neexistuje`)).json()).total, 0);
+  // beh vráti ID behu, výsledok má nový feed
+  const run = await (await bearer(`/projects/${proj.id}/run`, { method: 'POST', body: {} })).json();
+  assert.ok(Number.isInteger(run.run_id), JSON.stringify(run));
+  let rr;
+  for (let i = 0; i < 60; i++) { rr = await (await bearer('/runs/' + run.run_id)).json(); if (rr.status !== 'running') break; await new Promise((x) => setTimeout(x, 100)); }
+  assert.equal(rr.summary.profiles[slug].written, 1, JSON.stringify(rr.summary));
+  // upratanie: profil zmazať cez PUT
+  cur = await (await api('/projects/' + proj.id)).json();
+  cur.config.profiles = cur.config.profiles.filter((x) => x.slug !== slug);
+  assert.equal((await api('/projects/' + proj.id, { method: 'PUT', body: cur })).status, 200);
+  proj = await (await api('/projects/' + proj.id)).json();
+});
+
+await t('MCP: nálezy z review (slug pri potvrdení, regex, polia pravidiel, dlhé ID akcie, výber pri obnove, ID pravidiel)', async () => {
+  const bearer = (p, opts = {}) => fetch(base + '/api' + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer mcp-token', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const prep = async (ops) => { const c = await (await bearer('/projects/' + proj.id)).json(); const r = await bearer(`/projects/${proj.id}/changes`, { method: 'POST', body: { rev: c.rev, ops } }); return [r.status, await r.json()]; };
+  // 1) slug obsadený medzi prípravou a potvrdením
+  let [st, ch] = await prep([{ op: 'create_profile', name: 'X', channel: 'meta', slug: 'shared-feed' }]);
+  assert.equal(st, 200, JSON.stringify(ch));
+  const other = await (await api('/projects', { method: 'POST', body: { name: 'B', slug: 'shared-feed', source_url: srcUrl } })).json();
+  let r = await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' });
+  assert.equal(r.status, 409); assert.equal((await r.json()).code, 'stale');
+  await api('/projects/' + other.id, { method: 'DELETE' });
+  // 2) regex s vnoreným opakovaním sa odmietne
+  [st] = await prep([{ op: 'set_selection', profile: proj.slug, mode: 'filter', when: [{ field: 'title', op: 'regex', value: '^(a+)+$' }] }]);
+  assert.equal(st, 400);
+  [st] = await prep([{ op: 'add_rule', scope: 'project', rule: { type: 'replace', field: 'title', find: '(x*)*y', with: '', regex: true } }]);
+  assert.equal(st, 400);
+  // 3) úprava poznámky nezmaže with / length / onlyIfEmpty
+  [st, ch] = await prep([
+    { op: 'add_rule', scope: 'project', rule: { type: 'replace', field: 'title', find: 'Test', with: 'Nový' } },
+    { op: 'add_rule', scope: 'project', rule: { type: 'set', field: 'brand', value: 'X', onlyIfEmpty: true } },
+    { op: 'add_rule', scope: 'project', rule: { type: 'truncate', field: 'title', length: 10 } },
+  ]);
+  assert.equal(st, 200, JSON.stringify(ch));
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  let cur = await (await bearer('/projects/' + proj.id)).json();
+  const added = cur.config.rules.slice(-3);
+  [st, ch] = await prep(added.map((x) => ({ op: 'update_rule', rule_id: x.id, patch: { note: 'pozn' } })));
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  cur = await (await bearer('/projects/' + proj.id)).json();
+  const [rep, set, tr] = cur.config.rules.slice(-3);
+  assert.equal(rep.with, 'Nový'); assert.equal(set.onlyIfEmpty, true); assert.equal(tr.length, 10); assert.equal(tr.note, 'pozn');
+  // 5) dlhý názov akcie: ID sa zmestí a priradenie produktu ostane
+  [st, ch] = await prep([{ op: 'upsert_campaign', name: 'Veľmi dlhý názov akcie, ktorý presahuje štyridsať znakov' }]);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  cur = await (await bearer('/projects/' + proj.id)).json();
+  const longC = cur.config.campaigns.at(-1);
+  assert.ok(longC.id.length <= 41 && longC.id.startsWith('velmi-dlhy'), longC.id);
+  [st, ch] = await prep([{ op: 'assign_products', ids: ['1'], campaign: longC.id }]);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  cur = await (await bearer('/projects/' + proj.id)).json();
+  assert.equal(cur.config.products['1'].campaign, longC.id);
+  // 7) obnova staršej verzie vráti aj výber produktov
+  [st, ch] = await prep([{ op: 'set_selection', profile: proj.slug, mode: 'ids', ids: ['1'] }]);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  const vers = await (await api(`/projects/${proj.id}/versions`)).json();
+  [st, ch] = await prep([{ op: 'set_selection', profile: proj.slug, mode: 'ids', ids: ['2'] }]);
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  cur = await (await api('/projects/' + proj.id)).json();
+  const v1 = vers.find((v) => (v.config?.profiles || []).some((x) => x.selection?.ids?.[0] === '1')) || vers[0];
+  r = await api(`/projects/${proj.id}/versions/${v1.id}/restore`, { method: 'POST', body: { rev: cur.rev } });
+  assert.equal(r.status, 200, await r.clone().text());
+  cur = await r.json();
+  assert.deepEqual(cur.config.profiles[0].selection.ids, ['1']);
+  // späť na všetky produkty a bez pridaných pravidiel
+  [st, ch] = await prep([{ op: 'set_selection', profile: proj.slug, mode: 'all' }, ...added.map((x) => ({ op: 'remove_rule', rule_id: x.id })), { op: 'assign_products', ids: ['1'], campaign: 'auto' }]);
+  assert.equal(st, 200, JSON.stringify(ch));
+  assert.equal((await bearer(`/changes/${ch.change_id}/apply`, { method: 'POST' })).status, 200);
+  proj = await (await api('/projects/' + proj.id)).json();
 });
 
 await t('duplikovanie a mazanie projektu', async () => {

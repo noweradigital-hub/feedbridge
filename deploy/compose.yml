@@ -7,7 +7,7 @@
 # root_default a smerujeme labelmi. NEPRIDÁVAŤ ďalšiu proxy.
 #
 # Povinné premenné: FEEDBRIDGE_IMAGE, FEEDBRIDGE_HOST, ADMIN_PASSWORD
-# Voliteľné: ADMIN_USER, NOTIFY_WEBHOOK_URL, MAGNIFIC_API_KEY, REMOVEBG_API_KEY, REMBG_URL
+# Voliteľné: ADMIN_USER, API_TOKEN (MCP nástroje), NOTIFY_WEBHOOK_URL, MAGNIFIC_API_KEY, REMOVEBG_API_KEY, REMBG_URL
 services:
   feedbridge:
     image: ${FEEDBRIDGE_IMAGE}
@@ -21,6 +21,7 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
       MAGNIFIC_API_KEY: ${MAGNIFIC_API_KEY:-}
+      API_TOKEN: ${API_TOKEN:-}
       REMOVEBG_API_KEY: ${REMOVEBG_API_KEY:-}
       REMBG_URL: ${REMBG_URL:-http://rembg:7000/api/remove}
       REMBG_MODEL: ${REMBG_MODEL:-isnet-general-use}

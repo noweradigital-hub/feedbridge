@@ -81,6 +81,31 @@ function rowToProject(r) {
 export const IMAGE_MODES = ['project', 'percent', 'campaign', 'clean', 'original'];
 
 /**
+ * Pravidlá majú trvalé `id`, aby sa dali adresovať (MCP nástroje, presun). Staré pravidlá bez id ho
+ * dostanú z obsahu a poradia, teda pri každom čítaní rovnaké; po uložení sa už nemení.
+ */
+export function normalizeRules(list, scope = 'P', used = new Set()) { // used: ID sú jedinečné v celom projekte
+  return (Array.isArray(list) ? list : []).filter((r) => r && typeof r === 'object').map((r, i) => {
+    let id = typeof r.id === 'string' && /^[a-z0-9]{4,24}$/.test(r.id) ? r.id : '';
+    if (!id || used.has(id)) id = 'r' + crypto.createHash('sha1').update(`${scope}:${i}:${JSON.stringify({ ...r, id: undefined })}`).digest('hex').slice(0, 9);
+    while (used.has(id)) id = 'r' + crypto.randomBytes(5).toString('hex').slice(0, 9);
+    used.add(id);
+    return { ...r, id };
+  });
+}
+
+/**
+ * Výber produktov profilu (ktoré produkty idú do feedu): all = všetky po pravidlách, ids = len zoznam
+ * zdrojových ID / skupín variantov, filter = len tie, ktoré spĺňajú podmienky (AND, ako pri pravidlách).
+ */
+export function normalizeSelection(s) {
+  const mode = ['all', 'ids', 'filter'].includes(s?.mode) ? s.mode : 'all';
+  const list = (v) => [...new Set((Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[\s,]+/) : []).map((x) => String(x).trim()).filter((x) => x && x.length <= 120))].slice(0, 20000);
+  const when = Array.isArray(s?.when) ? s.when.filter((c) => c && typeof c.field === 'string' && c.field && typeof c.op === 'string') : [];
+  return { mode, ids: list(s?.ids), groups: list(s?.groups), when };
+}
+
+/**
  * Vizuál profilu. Google a ChatGPT mali kedysi pevne pôvodnú fotku a uložené `imageMode` sa u nich
  * ignorovalo (býva tam 'project'). Platí preto len hodnota zvolená po zmene (imageModeVersion 2),
  * staré profily týchto kanálov ostávajú pri pôvodnej fotke.
@@ -91,7 +116,7 @@ function profileImageMode(p, channel) {
   return p.imageModeVersion === 2 && valid ? p.imageMode : 'original';
 }
 
-export function normalizeProfiles(list, projectSlug) {
+export function normalizeProfiles(list, projectSlug, usedRuleIds = new Set()) {
   const out = (Array.isArray(list) ? list : []).filter((p) => p && validSlug(p.slug)).map((p) => {
     const channel = ['google', 'chatgpt'].includes(p.channel) ? p.channel : 'meta';
     return Object.assign({
@@ -104,11 +129,12 @@ export function normalizeProfiles(list, projectSlug) {
       imageModeVersion: 2,
       campaign: typeof p.campaign === 'string' && /^[a-z0-9-]{1,40}$/.test(p.campaign) ? p.campaign : '', // akcia pre všetky produkty profilu
       tagPosition: TAG_POSITIONS.includes(p.tagPosition) ? p.tagPosition : 'auto', // auto = podľa záložky Obrázky
-      rules: Array.isArray(p.rules) ? p.rules : [],
+      selection: normalizeSelection(p.selection),
+      rules: normalizeRules(p.rules, `F:${p.slug}`, usedRuleIds),
     }, channel === 'chatgpt' ? { openai: normalizeOpenAI(p.openai) } : {}); // predajca a vrátenie tovaru pre OpenAI
   });
   if (!out.length && projectSlug) {
-    out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', imageModeVersion: 2, rules: [] });
+    out.push({ id: 'main', slug: projectSlug, name: 'Meta', channel: 'meta', enabled: true, imageMode: 'project', imageModeVersion: 2, campaign: '', tagPosition: 'auto', selection: normalizeSelection(), rules: [] });
   }
   return out;
 }
@@ -118,13 +144,15 @@ export function normalizeConfig(cfg, projectSlug) {
   const c = cfg || {};
   const campaigns = normalizeCampaigns(c.campaigns);
   const badge = { ...base.images.badge, ...((c.images || {}).badge || {}) };
+  const ruleIds = new Set();
+  const rules = normalizeRules(Array.isArray(c.rules) ? c.rules : base.rules, 'P', ruleIds); // najprv projekt: jeho ID ostávajú
   return {
-    profiles: normalizeProfiles(c.profiles, projectSlug),
+    profiles: normalizeProfiles(c.profiles, projectSlug, ruleIds),
     brand: normalizeBrand(c.brand),
     campaigns,
     products: normalizeOverrides(c.products, campaigns),
     groups: normalizeOverrides(c.groups, campaigns),
-    rules: Array.isArray(c.rules) ? c.rules : base.rules,
+    rules,
     images: {
       ...base.images,
       ...(c.images || {}),
