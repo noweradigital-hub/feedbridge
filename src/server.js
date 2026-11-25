@@ -74,6 +74,10 @@ function auth(req, res, next) {
   if (h.startsWith('Basic ')) {
     const [u, ...rest] = Buffer.from(h.slice(6), 'base64').toString().split(':');
     if (safeEq(u, config.adminUser) && safeEq(rest.join(':'), config.adminPassword)) return next();
+    const hash = crypto.createHash('sha256').update(rest.join(':')).digest('hex');
+    let ok = false;
+    for (const x of config.users) ok = (safeEq(u, x.user) && safeEq(hash, x.hash)) || ok; // bez skorého návratu
+    if (ok) return next();
   }
   res.set('WWW-Authenticate', 'Basic realm="FeedBridge"');
   res.status(401).send('Prihlásenie je povinné');

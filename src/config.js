@@ -17,6 +17,11 @@ export const config = {
   dbFile: path.join(DATA_DIR, 'feedbridge.db'),
   adminUser: process.env.ADMIN_USER || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || '',
+  // Ďalší ľudia do admin UI: "meno:sha256(hesla)" oddelené čiarkou; heslo sa v env neukladá, každý sa dá zrušiť zvlášť
+  users: (process.env.ADMIN_USERS || '').split(',').map((e) => e.trim()).filter(Boolean).map((e) => {
+    const i = e.lastIndexOf(':');
+    return { user: e.slice(0, i).trim(), hash: e.slice(i + 1).trim().toLowerCase() };
+  }).filter((u) => u.user && /^[0-9a-f]{64}$/.test(u.hash)),
   // Bearer tokeny pre MCP nástroje, oddelené čiarkou (každý človek vlastný, dá sa zrušiť zvlášť); prázdne = vypnuté
   apiTokens: (process.env.API_TOKEN || '').split(',').map((t) => t.trim()).filter((t) => t.length >= 16),
   removeBgKey: process.env.REMOVEBG_API_KEY || '',

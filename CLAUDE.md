@@ -39,7 +39,7 @@ Dáta: `DATA_DIR/feedbridge.db`, `feeds/<slug>.xml`, `images/<slug>/<hash>.jpg`,
 - Obrázky: výrez produktu sa cacheuje zvlášť (`cache/cutouts`, kľúč = URL + provider), výsledný JPEG podľa hashu všetkých nastavení. Zmena pozadia teda nevolá remove.bg znova. Nepoužívané súbory sa po behu mažú (`pruneImages`).
 - Výstupné obrázky majú min. 500 px (požiadavka Mety).
 - `image_link` vo výstupe ukazuje na `PUBLIC_URL/img/...`, preto musí byť `PUBLIC_URL` verejná HTTPS adresa.
-- Admin API používa Basic auth (`ADMIN_USER`/`ADMIN_PASSWORD`); `/feeds` a `/img` sú verejné.
+- Admin API používa Basic auth (`ADMIN_USER`/`ADMIN_PASSWORD` + ďalší ľudia v `ADMIN_USERS` ako `meno:sha256(hesla)` oddelené čiarkou); `/feeds` a `/img` sú verejné.
 - Poistka poklesu (`config.safety.maxDropPct`, default 50, 0 = vypnuté, rovnako ako `drop_guard` v nwr-product-feeds): beh porovná počet unikátnych ID s publikovaným feedom ešte pred obrázkami. Pri 0 ID alebo väčšom poklese hodí `GuardError`, takže feed sa neprepíše. Meta v režime „nahradiť“ by chýbajúce produkty zmazala. Obísť sa dá len manuálne cez `POST /run {force:true}` (UI sa pýta); scheduler nikdy.
 - Slug sa po vytvorení nemení (PUT vráti 409), lebo na ňom visí URL feedu v Mete.
 - Na konci `applyRules` sa `availability` normalizuje na hodnoty Mety (`in_stock` → `in stock`, `backorder` → `available for order`). Podmienky nad `availability` akceptujú oba zápisy. `condition` je povinné, `brand/gtin/mpn` je len odporúčanie (`checkItem().warnings`).

@@ -10,6 +10,7 @@ import sharp from 'sharp';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feedbridge-api-'));
 process.env.DATA_DIR = tmp;
 process.env.ADMIN_PASSWORD = 'tajne';
+process.env.ADMIN_USERS = 'filip@nowera.sk:e6a6b8df7f55016b1641d89eb23970b2a41547e28f5aa6ecae43ca679f639755, zly-zaznam';
 process.env.API_TOKEN = 'mcp-token-0123456789, kolega-token-0123456789,kratky';
 process.env.ALLOW_PRIVATE_FETCH = '1'; // fixture servery bežia na 127.0.0.1
 process.env.PORT = '0';
@@ -49,6 +50,9 @@ const t = async (name, fn) => {
 await t('admin bez hesla = 401, so zlým heslom = 401', async () => {
   assert.equal((await fetch(base + '/api/projects')).status, 401);
   assert.equal((await fetch(base + '/api/projects', { headers: { Authorization: 'Basic ' + Buffer.from('admin:zle').toString('base64') } })).status, 401);
+  assert.equal((await fetch(base + '/api/projects', { headers: { Authorization: 'Basic ' + Buffer.from('filip@nowera.sk:filip:heslo').toString('base64') } })).status, 200, 'ďalší používateľ z ADMIN_USERS');
+  assert.equal((await fetch(base + '/api/projects', { headers: { Authorization: 'Basic ' + Buffer.from('filip@nowera.sk:zle').toString('base64') } })).status, 401);
+  assert.equal((await fetch(base + '/api/projects', { headers: { Authorization: 'Basic ' + Buffer.from('admin:filip:heslo').toString('base64') } })).status, 401, 'meno a heslo sa nekrížia');
   assert.equal((await fetch(base + '/admin/')).status, 401);
 });
 await t('UI sa servíruje po prihlásení', async () => {
